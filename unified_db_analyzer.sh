@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.0 - Data Composition Analysis)
+# HIS DATABASE MIGRATION ANALYZER (v6.1 - Fix Logging)
 # Features: 
 #   1. New Metrics: Empty String ("") count & Zero (0) count
 #   2. Smart Skip Date Frequency
 #   3. Deep Analysis Mode
+#   4. Fixed: Restore missing process logs
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -160,6 +161,7 @@ analyze_mysql() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
+        log_activity "Processing Table: $TABLE"  # <--- Restore Log Here
         
         COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
             SELECT c.COLUMN_NAME, c.DATA_TYPE, IF(c.COLUMN_KEY='PRI', 'YES', '') as IS_PK,
@@ -244,6 +246,7 @@ analyze_postgres() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
+        log_activity "Processing Table: $TABLE" # <--- Restore Log Here
 
         COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
             SELECT c.column_name, c.data_type,
