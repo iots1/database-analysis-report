@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v7.0 - Schema Support & Bit Type Fix)
+# HIS DATABASE MIGRATION ANALYZER (v7.1 - Smart Sample Data)
 # Features:
-#   1. **New:** Schema support for PostgreSQL and MSSQL (configurable via config.json)
-#   2. **Fix:** Skip MIN/MAX operations for bit/boolean datatypes to avoid errors
-#   3. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
-#   4. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
-#   5. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
-#   6. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
-#   7. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
-#   8. **New:** Auto-install support for sqlcmd (mssql-tools18)
-#   9. Table Size (MB) Calculation & Data Composition Analysis
+#   1. **New:** Smart sample data filtering (NOT NULL AND NOT EMPTY) for all databases
+#   2. **New:** Schema support for PostgreSQL and MSSQL (configurable via config.json)
+#   3. **Fix:** Skip MIN/MAX operations for bit/boolean datatypes to avoid errors
+#   4. **Fix:** Schema defaults: empty string → 'public' (PG) or 'dbo' (MSSQL)
+#   5. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
+#   6. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
+#   7. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
+#   8. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
+#   9. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#  10. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#  11. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -271,7 +273,7 @@ analyze_mysql() {
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
-            SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
+            SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL AND CAST(\`$COL_NAME\` AS CHAR) <> '' LIMIT $LIMIT_N) x;")
             
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g'); CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
 
@@ -348,7 +350,7 @@ analyze_postgres() {
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
-            QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
+            QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL AND CAST(\"$COL_NAME\" AS TEXT) <> '' LIMIT $LIMIT_N) t)"
             SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
             
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
@@ -463,7 +465,7 @@ analyze_mssql() {
                     DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
                     IF @Dist = 1 SET @Limit = 1;
 
-                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL AND CAST([' + @CName + '] AS NVARCHAR(MAX)) <> '''' FOR XML PATH('''')), 1, 3, '''');
 
                     PRINT ''' + @TName + ','' + ''' + @CName + ','' + ''' + @DType + ','' + ''' + @PK + ','' + CHAR(34) + REPLACE(REPLACE(''' + REPLACE(@FK,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)), ''NULL'', '''') + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Def,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Comm,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' +
                           CAST(@Total AS VARCHAR) + '','' + CAST(@TblSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
