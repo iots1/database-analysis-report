@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.2 - Selective Table Analysis)
+# HIS DATABASE MIGRATION ANALYZER (v6.3 - Table Size Analysis)
 # Features: 
-#   1. Selective Tables: Define specific tables in config.json to analyze
-#   2. New Metrics: Empty String & Zero count
-#   3. Smart Skip Date Frequency
-#   4. Deep Analysis Mode
+#   1. **New:** Table Size (MB) Calculation for Overview
+#   2. Selective Tables
+#   3. Data Composition Analysis (Empty/Zero)
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -47,8 +46,8 @@ log_activity() {
     echo "[$timestamp] $msg" >> "$LOG_FILE"
 }
 
-# Header CSV
-echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Null_Count,Empty_Count,Zero_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
+# Header CSV (Added Table_Size_MB)
+echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Table_Size_MB,Null_Count,Empty_Count,Zero_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
 
 # --- DEPENDENCIES ---
 check_command() {
@@ -81,8 +80,7 @@ DB_NAME=$(jq -r '.database.name' "$CONFIG_FILE")
 DB_USER=$(jq -r '.database.user' "$CONFIG_FILE")
 DB_PASS=$(jq -r '.database.password' "$CONFIG_FILE")
 
-# Load Selective Tables (Array to String)
-# jq output: "table1 table2" or empty
+# Selective Tables
 SELECTED_TABLES_STR=$(jq -r '.database.tables[]?' "$CONFIG_FILE" | tr '\n' ' ')
 
 case "$DB_TYPE" in
@@ -100,18 +98,10 @@ EXCEPTIONS_STRING=$(jq -r '.sampling.exceptions[] | "\(.table).\(.column)=\(.lim
 EXCEPTIONS_COUNT=$(jq '.sampling.exceptions | length' "$CONFIG_FILE")
 
 log_activity "Target: $DB_NAME ($DB_TYPE) @ $DB_HOST:$DB_PORT"
-if [ -n "$SELECTED_TABLES_STR" ]; then
-    log_activity "Config: Analyzing SPECIFIC tables only."
-else
-    log_activity "Config: Analyzing ALL tables."
-fi
 log_activity "Config: Deep Analysis=$DEEP_ANALYSIS, Default Limit=$DEFAULT_LIMIT"
 
-# Helper function
 get_sample_limit() {
-    local tbl="$1"
-    local col="$2"
-    local distinct_val="$3"
+    local tbl="$1"; local col="$2"; local distinct_val="$3"
     if [ "$distinct_val" == "1" ]; then echo "1"; return; fi
     local search_key="$tbl.$col="
     if [[ "$EXCEPTIONS_STRING" == *"$search_key"* ]]; then
@@ -146,11 +136,7 @@ echo "========================================="
 echo "🐚 Shell: Bash $BASH_VERSION"
 echo "🔌 Target: $DB_NAME ($DB_TYPE)"
 echo "🧠 Deep Analysis: $DEEP_ANALYSIS"
-if [ -n "$SELECTED_TABLES_STR" ]; then
-    echo "🎯 Scope: Selected tables only"
-else
-    echo "🎯 Scope: All tables"
-fi
+if [ -n "$SELECTED_TABLES_STR" ]; then echo "🎯 Scope: Selected tables only"; else echo "🎯 Scope: All tables"; fi
 echo "📂 Output: $RUN_DIR"
 echo "-----------------------------------------"
 
@@ -162,39 +148,35 @@ analyze_mysql() {
     check_command "mysqldump" "mysql-client"
 
     log_activity "Starting DDL Export..."
-    # Note: Exporting FULL Schema is usually safer for references, 
-    # but if you want only selected tables in DDL, modify here. Keeping full for context.
     mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" --no-data --routines --triggers "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
-    
-    # --- SELECTIVE TABLE LOGIC ---
     if [ -n "$SELECTED_TABLES_STR" ]; then
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
         RAW_TABLES=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES")
         TABLES_ARRAY=($RAW_TABLES)
     fi
-    # -----------------------------
-    
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
-    log_activity "Tables to process: $TOTAL_TABLES"
     
-    CURRENT_IDX=0
-    START_TIME=$(date +%s)
+    CURRENT_IDX=0; START_TIME=$(date +%s)
 
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
         
-        # Check if table exists (for manual input safety)
         CHECK_EXIST=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES LIKE '$TABLE'")
-        if [ -z "$CHECK_EXIST" ]; then
-            log_activity "Warning: Table '$TABLE' not found. Skipping."
-            continue
-        fi
+        if [ -z "$CHECK_EXIST" ]; then continue; fi
         
+        # --- GET TABLE SIZE (MB) ---
+        TBL_SIZE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
+            SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = '$DB_NAME' AND TABLE_NAME = '$TABLE';")
+        # If size is empty/null, default to 0
+        [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
+
         COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
             SELECT c.COLUMN_NAME, c.DATA_TYPE, IF(c.COLUMN_KEY='PRI', 'YES', '') as IS_PK,
                 (SELECT CONCAT('-> ', k.REFERENCED_TABLE_NAME, '.', k.REFERENCED_COLUMN_NAME) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA=c.TABLE_SCHEMA AND k.TABLE_NAME=c.TABLE_NAME AND k.COLUMN_NAME=c.COLUMN_NAME AND k.REFERENCED_TABLE_NAME IS NOT NULL LIMIT 1) as FK_REF,
@@ -203,29 +185,17 @@ analyze_mysql() {
         
         echo "$COLUMNS" | while IFS=$'\t' read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
             STATS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                SELECT 
-                    COUNT(*), 
-                    SUM(IF(\`$COL_NAME\` IS NULL,1,0)),
-                    SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '', 1, 0)),
-                    SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '0', 1, 0)),
-                    MAX(LENGTH(\`$COL_NAME\`)), 
-                    COUNT(DISTINCT \`$COL_NAME\`) 
-                FROM \`$TABLE\`;")
-            
+                SELECT COUNT(*), SUM(IF(\`$COL_NAME\` IS NULL,1,0)), SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '', 1, 0)), SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '0', 1, 0)), MAX(LENGTH(\`$COL_NAME\`)), COUNT(DISTINCT \`$COL_NAME\`) FROM \`$TABLE\`;")
             read TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS"
             
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                    SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
-                MIN_VAL=$(echo "$MINMAX" | cut -f1)
-                MAX_VAL=$(echo "$MINMAX" | cut -f2)
+                MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
+                MIN_VAL=$(echo "$MINMAX" | cut -f1); MAX_VAL=$(echo "$MINMAX" | cut -f2)
                 
                 IS_DATE=$(is_date_type "$COL_TYPE")
                 if [ "$IS_DATE" == "false" ]; then
-                    TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                        SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') 
-                        FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
+                    TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
                 else
                     TOP_5="(Skipped for Date/Time)"
                 fi
@@ -233,19 +203,12 @@ analyze_mysql() {
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
-
-            SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
+            SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
             
-            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n')
-            CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g')
-            CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g')
-            CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g')
-            CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g')
-            CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
-            CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g')
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g')
+            CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g')
 
-            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
     done
     echo ""
@@ -263,34 +226,27 @@ analyze_postgres() {
     pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -s "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
-    
-    # --- SELECTIVE TABLE LOGIC ---
     if [ -n "$SELECTED_TABLES_STR" ]; then
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
-        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
-            SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
         TABLES_ARRAY=($RAW_TABLES)
     fi
-    # -----------------------------
-
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
-    log_activity "Tables to process: $TOTAL_TABLES"
     
-    CURRENT_IDX=0
-    START_TIME=$(date +%s)
+    CURRENT_IDX=0; START_TIME=$(date +%s)
 
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
         
-        # Safety check for manual input in PG
         CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('public.$TABLE')")
-        if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then
-             log_activity "Warning: Table '$TABLE' not found or not visible. Skipping."
-             continue
-        fi
+        if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then continue; fi
+
+        # --- GET TABLE SIZE (MB) ---
+        TBL_SIZE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT ROUND(pg_total_relation_size('\"$TABLE\"') / 1024.0 / 1024.0, 2)")
+        [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
 
         COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
             SELECT c.column_name, c.data_type,
@@ -300,30 +256,17 @@ analyze_postgres() {
             FROM information_schema.columns c WHERE c.table_schema = 'public' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
 
         echo "$COLUMNS" | while IFS="|" read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            QUERY_STATS="SELECT 
-                COUNT(*), 
-                COUNT(*) - COUNT(\"$COL_NAME\"), 
-                COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''),
-                COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'),
-                MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), 
-                COUNT(DISTINCT \"$COL_NAME\") 
-                FROM \"$TABLE\""
-            
+            QUERY_STATS="SELECT COUNT(*), COUNT(*) - COUNT(\"$COL_NAME\"), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'), MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), COUNT(DISTINCT \"$COL_NAME\") FROM \"$TABLE\""
             STATS_RESULT=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F"," -c "$QUERY_STATS")
-            
             IFS=',' read -r TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS_RESULT"
 
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
                 MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$TABLE\"")
-                MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1)
-                MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
-                
+                MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1); MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
                 IS_DATE=$(is_date_type "$COL_TYPE")
                 if [ "$IS_DATE" == "false" ]; then
-                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
-                        SELECT string_agg(val || ' (' || cnt || ')', ' | ') 
-                        FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT string_agg(val || ' (' || cnt || ')', ' | ') FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
                 else
                     TOP_5="(Skipped for Date/Time)"
                 fi
@@ -331,19 +274,13 @@ analyze_postgres() {
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
-
             QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
             SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
             
-            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g')
-            CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g')
-            CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n')
-            CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g')
-            CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g')
-            CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g')
-            CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n')
+            CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
 
-            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
     done
     unset PGPASSWORD
@@ -353,18 +290,10 @@ analyze_postgres() {
 # ==============================================================================
 # 3. MSSQL Logic
 # ==============================================================================
-analyze_mssql() {
-    check_command "sqlcmd"
-    log_activity "MSSQL Analysis not fully implemented for Empty/Zero in this version."
-}
+analyze_mssql() { check_command "sqlcmd"; log_activity "MSSQL Analysis not fully implemented."; }
 
 # --- MAIN ---
-case $DB_CHOICE in
-    1) analyze_mysql ;;
-    2) analyze_postgres ;;
-    3) analyze_mssql ;;
-    *) log_activity "Invalid Selection"; echo "❌ Invalid Selection"; exit 1 ;;
-esac
+case $DB_CHOICE in 1) analyze_mysql ;; 2) analyze_postgres ;; 3) analyze_mssql ;; *) log_activity "Invalid"; exit 1 ;; esac
 
 echo "========================================="
 echo "✅ Analysis Complete!"
@@ -376,7 +305,6 @@ echo "└── 📝 Log:     $LOG_FILE"
 if [ -f "csv_to_html.py" ]; then
     echo "🌍 Generating HTML Report..."
     python3 csv_to_html.py "$REPORT_FILE"
-    
     HTML_FILE="${REPORT_FILE%.csv}.html"
     if [ -f "$HTML_FILE" ]; then
         if command -v open &> /dev/null; then open "$HTML_FILE"

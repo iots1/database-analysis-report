@@ -31,7 +31,6 @@ if os.path.exists(ddl_file_path):
     try:
         with open(ddl_file_path, 'r', encoding='utf-8', errors='replace') as f:
             sql_content = f.read()
-            # Simple Regex to capture CREATE TABLE statements
             regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[a-zA-Z0-9_]+\.)?[`"]?([a-zA-Z0-9_]+)[`"]?\s*\((?:[^;]|\n)*?\);'
             matches = re.finditer(regex, sql_content, re.IGNORECASE | re.DOTALL)
             for match in matches:
@@ -48,9 +47,10 @@ try:
         for row in reader:
             t_name = row.get('Table', '')
             
-            # Numeric handling
             try: total = int(row.get('Total_Rows', 0))
             except: total = 0
+            try: size = float(row.get('Table_Size_MB', 0)) # New Column
+            except: size = 0.0
             try: nulls = int(row.get('Null_Count', 0))
             except: nulls = 0
             try: empties = int(row.get('Empty_Count', 0))
@@ -58,12 +58,11 @@ try:
             try: zeros = int(row.get('Zero_Count', 0))
             except: zeros = 0
 
-            # Calculate %
             null_pct = (nulls / total * 100) if total > 0 else 0
             empty_pct = (empties / total * 100) if total > 0 else 0
 
             if t_name not in table_stats:
-                table_stats[t_name] = {'rows': total, 'cols': 0, 'empty_cols': 0}
+                table_stats[t_name] = {'rows': total, 'cols': 0, 'empty_cols': 0, 'size': size}
             table_stats[t_name]['cols'] += 1
             if null_pct == 100:
                 table_stats[t_name]['empty_cols'] += 1
@@ -118,6 +117,7 @@ try:
         overview_rows.append({
             "table": tbl_link,
             "rows": f'{stats["rows"]:,}',
+            "size": f'{stats["size"]:,.2f} MB', # New Column
             "cols": stats['cols'],
             "empty": stats['empty_cols'],
             "quality": f'<b class="{q_color}">{quality:.1f}%</b>'
@@ -156,43 +156,12 @@ html_content = f"""
         .fk-detail {{ font-size: 0.8em; color: #0d6efd; font-family: monospace; }}
         tr.warning-row td {{ background-color: #fff5f5 !important; }}
         
-        /* --- Button Styling --- */
         .dt-buttons .btn-group {{ display: flex; flex-wrap: wrap; gap: 5px; }}
-        
-        /* Common Button Properties */
-        .dt-button {{ 
-            border-radius: 6px !important; 
-            padding: 5px 12px !important;
-            font-size: 0.9rem !important;
-            transition: all 0.2s ease-in-out !important;
-            background-image: none !important;
-        }}
-
-        /* Primary Buttons (Show/Hide) */
-        .buttons-colvis {{ 
-            background-color: transparent !important;
-            border: 1px solid #0d6efd !important; 
-            color: #0d6efd !important; 
-        }}
-        .buttons-colvis:hover {{ 
-            background-color: #0d6efd !important; 
-            color: white !important; 
-        }}
-
-        /* Secondary Buttons (Page Length) - Customized */
-        .btn-outline-secondary {{
-            background-color: #fff !important;
-            color: #333 !important;
-            border: 1px solid #6c757d !important;
-        }}
-        .btn-outline-secondary:hover, 
-        .btn-outline-secondary:active,
-        .btn-outline-secondary.active {{
-            background-color: #0d6efd !important; /* Blue Background on Hover */
-            color: #fff !important;                /* White Text on Hover */
-            border-color: #0d6efd !important;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2) !important;
-        }}
+        .dt-button {{ border-radius: 6px !important; padding: 5px 12px !important; font-size: 0.9rem !important; transition: all 0.2s ease-in-out !important; background-image: none !important; }}
+        .buttons-colvis {{ background-color: transparent !important; border: 1px solid #0d6efd !important; color: #0d6efd !important; }}
+        .buttons-colvis:hover {{ background-color: #0d6efd !important; color: white !important; }}
+        .btn-outline-secondary {{ background-color: #fff !important; color: #333 !important; border: 1px solid #6c757d !important; }}
+        .btn-outline-secondary:hover, .btn-outline-secondary.active {{ background-color: #0d6efd !important; color: #fff !important; border-color: #0d6efd !important; box-shadow: 0 2px 5px rgba(0,0,0,0.2) !important; }}
 
         pre.sql-code {{ background-color: #282c34; color: #abb2bf; padding: 15px; border-radius: 6px; font-size: 13px; max-height: 500px; overflow: auto; }}
         .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; height: 600px; overflow-y: auto; font-family: monospace; }}
@@ -206,7 +175,7 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v6.1 + UI Refresh</span>
+            <span class="badge bg-primary rounded-pill p-2">v6.3 Table Size</span>
         </div>
     </div>
 
@@ -217,38 +186,34 @@ html_content = f"""
     </ul>
 
     <div class="tab-content pt-4">
-        <!-- Overview Tab -->
         <div class="tab-pane fade show active" id="overview">
             <table id="overviewTable" class="table table-hover table-bordered w-100">
-                <thead class="table-light"><tr><th>Table Name (Click for Schema)</th><th>Total Rows</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr></thead>
+                <thead class="table-light">
+                    <tr><th>Table Name</th><th>Total Rows</th><th>Size (MB)</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr>
+                </thead>
                 <tbody></tbody>
             </table>
         </div>
 
-        <!-- Detail Tab -->
         <div class="tab-pane fade" id="detail">
             <table id="detailTable" class="table table-hover table-bordered w-100">
                 <thead class="table-light">
                     <tr>
                         <th>Table</th><th>Column</th><th>Type</th><th>Key / Ref</th><th>Default</th>
-                        <th>Rows</th><th>Nulls</th>
-                        <th>Empty / Zero</th>
-                        <th>Dist.</th><th>Min</th><th>Max</th>
-                        <th>Top 5 Freq</th><th>Sample</th>
+                        <th>Rows</th><th>Nulls</th><th>Empty / Zero</th>
+                        <th>Dist.</th><th>Min</th><th>Max</th><th>Top 5 Freq</th><th>Sample</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
             </table>
         </div>
 
-        <!-- Log Tab -->
         <div class="tab-pane fade" id="log">
             <div class="log-container"><pre>{log_content}</pre></div>
         </div>
     </div>
 </div>
 
-<!-- DDL Modal -->
 <div class="modal fade" id="ddlModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
@@ -277,7 +242,7 @@ html_content = f"""
     let ddlModal;
 
     function showDDL(tableName) {{
-        const content = ddlData[tableName] || "-- DDL not found for " + tableName + "\\n-- Note: Ensure schema.sql was generated successfully.";
+        const content = ddlData[tableName] || "-- DDL not found for " + tableName;
         document.getElementById('ddlModalTitle').innerText = 'Schema: ' + tableName;
         document.getElementById('ddlModalBody').innerText = content;
         if(!ddlModal) ddlModal = new bootstrap.Modal(document.getElementById('ddlModal'));
@@ -285,22 +250,19 @@ html_content = f"""
     }}
 
     $(document).ready(function() {{
-        // Overview
         $('#overviewTable').DataTable({{
             data: overviewData,
             columns: [
                 {{ data: 'table' }}, {{ data: 'rows', className: 'text-end' }}, 
+                {{ data: 'size', className: 'text-end' }}, // New Column
                 {{ data: 'cols', className: 'text-end' }}, {{ data: 'empty', className: 'text-end' }}, 
                 {{ data: 'quality', className: 'text-end' }}
             ],
             pageLength: 15, order: [[ 1, "desc" ]],
             dom: '<"d-flex justify-content-between mb-3"Bf>rtip',
-            buttons: [ 
-                {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }} 
-            ]
+            buttons: [ {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }} ]
         }});
 
-        // Detail
         $('#detailTable').DataTable({{
             data: detailData,
             columns: [
@@ -312,12 +274,7 @@ html_content = f"""
             ],
             dom: '<"d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3"Bf>rtip',
             buttons: [
-                {{
-                    extend: 'colvis',
-                    text: '👁️ Columns',
-                    className: 'btn buttons-colvis',
-                    columns: ':not(:first-child)'
-                }},
+                {{ extend: 'colvis', text: '👁️ Columns', className: 'btn buttons-colvis', columns: ':not(:first-child)' }},
                 {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }}
             ],
             createdRow: function(row, data) {{ if(data.is_warning) $(row).addClass('warning-row'); }},
