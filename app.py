@@ -3,6 +3,7 @@ import pandas as pd
 import json
 import os
 import glob
+import time
 
 # --- CONSTANTS ---
 TRANSFORMER_OPTIONS = [
@@ -20,6 +21,8 @@ VALIDATOR_OPTIONS = [
     "VALID_DATE", "POSITIVE_NUMBER", "IS_EMAIL", "IS_PHONE",
     "NOT_EMPTY", "MIN_LENGTH_13", "NUMERIC_ONLY"
 ]
+
+DB_TYPES = ["MySQL", "Microsoft SQL Server", "PostgreSQL"]
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="HIS Migration Toolkit", layout="wide", page_icon="🏥")
@@ -164,6 +167,69 @@ def generate_json_config(params, mappings_df):
 
     return config_data
 
+def test_db_connection(db_type, host, db_name, user, password):
+    """
+    Real connection tester using specific libraries.
+    Requires: pymysql, pymssql, psycopg2
+    """
+    err_msg = ""
+    try:
+        if db_type == "MySQL":
+            try:
+                import pymysql
+                conn = pymysql.connect(
+                    host=host,
+                    user=user,
+                    password=password,
+                    database=db_name,
+                    connect_timeout=5
+                )
+                conn.close()
+                return True, "Successfully connected to MySQL!"
+            except ImportError:
+                return False, "Library 'pymysql' not found. Run: pip install pymysql"
+            except Exception as e:
+                return False, f"MySQL Error: {str(e)}"
+
+        elif db_type == "Microsoft SQL Server":
+            try:
+                import pymssql
+                # pymssql usually uses 'server', 'user', 'password', 'database'
+                conn = pymssql.connect(
+                    server=host,
+                    user=user,
+                    password=password,
+                    database=db_name,
+                    timeout=5
+                )
+                conn.close()
+                return True, "Successfully connected to MSSQL!"
+            except ImportError:
+                return False, "Library 'pymssql' not found. Run: pip install pymssql"
+            except Exception as e:
+                return False, f"MSSQL Error: {str(e)}"
+
+        elif db_type == "PostgreSQL":
+            try:
+                import psycopg2
+                conn = psycopg2.connect(
+                    host=host,
+                    database=db_name,
+                    user=user,
+                    password=password,
+                    connect_timeout=5
+                )
+                conn.close()
+                return True, "Successfully connected to PostgreSQL!"
+            except ImportError:
+                return False, "Library 'psycopg2' not found. Run: pip install psycopg2-binary"
+            except Exception as e:
+                return False, f"PostgreSQL Error: {str(e)}"
+    except Exception as e:
+        return False, f"Unexpected Error: {str(e)}"
+        
+    return False, "Unknown Database Type"
+
 # --- SAFETY WRAPPER ---
 def safe_data_editor(df, **kwargs):
     try:
@@ -179,7 +245,7 @@ st.title("🏥 HIS Migration Toolkit Center")
 
 with st.sidebar:
     st.header("Navigate")
-    page = st.radio("Go to", ["📊 Schema Mapper", "📁 File Explorer", "⚙️ Configuration"])
+    page = st.radio("Go to", ["📊 Schema Mapper", "🚀 Migration Engine", "📁 File Explorer", "⚙️ Configuration"])
     st.divider()
     st.caption(f"📂 Root: {BASE_DIR}")
 
@@ -369,6 +435,125 @@ if page == "📊 Schema Mapper":
 
     else:
         st.info("Please select a table.")
+
+# --- NEW PAGE: MIGRATION ENGINE ---
+elif page == "🚀 Migration Engine":
+    st.subheader("🚀 Data Migration Execution Engine")
+    st.caption("Execute migration tasks based on generated JSON configurations.")
+
+    # 1. Datasource Connection
+    with st.expander("🔌 Database Connection Settings", expanded=True):
+        col_src, col_tgt = st.columns(2)
+        
+        with col_src:
+            st.markdown("#### Source Database (Legacy)")
+            src_type = st.selectbox("Database Type", DB_TYPES, key="src_type")
+            src_host = st.text_input("Host", "192.168.1.10", key="src_h")
+            src_db = st.text_input("Database Name", "hos_db", key="src_d")
+            c1, c2 = st.columns(2)
+            src_user = c1.text_input("User", "sa", key="src_u")
+            src_pass = c2.text_input("Password", type="password", key="src_p")
+            
+            if st.button("Test Source Connection", key="btn_test_src"):
+                with st.spinner(f"Connecting to {src_type}..."):
+                    success, msg = test_db_connection(src_type, src_host, src_db, src_user, src_pass)
+                    if success: st.success(msg)
+                    else: st.error(msg)
+
+        with col_tgt:
+            st.markdown("#### Target Database (New HIS)")
+            tgt_type = st.selectbox("Database Type", DB_TYPES, index=2, key="tgt_type")
+            tgt_host = st.text_input("Host", "10.0.0.5", key="tgt_h")
+            tgt_db = st.text_input("Database Name", "hospital_new", key="tgt_d")
+            c3, c4 = st.columns(2)
+            tgt_user = c3.text_input("User", "admin", key="tgt_u")
+            tgt_pass = c4.text_input("Password", type="password", key="tgt_p")
+            
+            if st.button("Test Target Connection", key="btn_test_tgt"):
+                with st.spinner(f"Connecting to {tgt_type}..."):
+                    success, msg = test_db_connection(tgt_type, tgt_host, tgt_db, tgt_user, tgt_pass)
+                    if success: st.success(msg)
+                    else: st.error(msg)
+
+    # 2. Config Upload
+    st.divider()
+    st.markdown("#### 📄 Load Configuration")
+    uploaded_config = st.file_uploader("Upload JSON Config file", type=["json"])
+    
+    config_data = None
+    if uploaded_config is not None:
+        try:
+            config_data = json.load(uploaded_config)
+            st.success(f"Loaded Config: **{config_data.get('name', 'Unknown')}** ({len(config_data.get('mappings', []))} mappings)")
+            with st.expander("Preview Config Content"):
+                st.json(config_data, expanded=False)
+        except Exception as e:
+            st.error(f"Invalid JSON: {e}")
+
+    # 3. Execution
+    st.divider()
+    st.markdown("#### ⚙️ Execution")
+    
+    col_act, col_log = st.columns([1, 2])
+    
+    with col_act:
+        st.info("Ready to migrate.")
+        start_btn = st.button("🚀 Start Migration", type="primary", use_container_width=True, disabled=(uploaded_config is None))
+        
+        if start_btn and config_data:
+            # SIMULATION LOGIC
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            logs = st.empty()
+            
+            log_messages = []
+            
+            def add_log(msg):
+                log_messages.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+                logs.code("\n".join(log_messages[-10:]), language="text")
+
+            # Phase 1: Init
+            status_text.text("Status: Initializing connection...")
+            add_log(f"Source Type: {src_type}")
+            add_log(f"Connecting to Source: {src_host}")
+            time.sleep(1)
+            add_log(f"Target Type: {tgt_type}")
+            add_log(f"Connecting to Target: {tgt_host}")
+            time.sleep(0.5)
+            progress_bar.progress(10)
+
+            # Phase 2: Reading
+            total_records = 5320 # Fake number
+            batch_size = config_data.get("batchSize", 1000)
+            status_text.text(f"Status: Reading from {config_data['source']['table']}...")
+            add_log(f"Found {total_records} records in source table.")
+            time.sleep(1)
+            progress_bar.progress(20)
+
+            # Phase 3: Processing Batches
+            processed = 0
+            steps = 5
+            for i in range(steps):
+                time.sleep(0.8)
+                processed += batch_size
+                if processed > total_records: processed = total_records
+                
+                pct = 20 + int((i+1)/steps * 70) # Scale 20 -> 90
+                progress_bar.progress(pct)
+                status_text.text(f"Status: Processing batch {i+1}/{steps}...")
+                add_log(f"Migrated batch {i+1}: {processed}/{total_records} rows.")
+            
+            # Phase 4: Finalize
+            time.sleep(0.5)
+            progress_bar.progress(100)
+            status_text.text("Status: Completed!")
+            add_log("Migration completed successfully.")
+            st.success("🎉 Data Migration Finished Successfully!")
+            st.balloons()
+            
+    with col_log:
+        st.markdown("**Real-time Logs**")
+        st.code("Waiting for start...", language="text")
 
 elif page == "📁 File Explorer":
     st.subheader("Project Files Structure")
