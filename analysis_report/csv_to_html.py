@@ -38,10 +38,26 @@ if os.path.exists(ddl_file_path):
     try:
         with open(ddl_file_path, 'r', encoding='utf-8', errors='replace') as f:
             sql_content = f.read()
-            regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[a-zA-Z0-9_]+\.)?[`"]?([a-zA-Z0-9_]+)[`"]?\s*\((?:[^;]|\n)*?\);'
-            matches = re.finditer(regex, sql_content, re.IGNORECASE | re.DOTALL)
-            for match in matches:
-                ddl_map[match.group(1)] = match.group(0)
+            # FIX: Improved Regex to handle [Schema].[Table] and special chars like '
+            # Matches: CREATE TABLE [dbo].[TableName] (
+            # Group 1: TableName (inside brackets or quotes)
+            regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\[?[\w\d_]+\]?\.\[?)?([\w\d_\'\s]+)\]?\s*\('
+            
+            # Split by "CREATE TABLE" to verify chunks manually if regex is tricky, 
+            # but let's try finditer with DOTALL first for the body.
+            # Note: To capture the whole body, we assume it ends with ); 
+            # The visual display just needs the body, but we need to map it to the name.
+            
+            # Simplified: Just map name to "View Source" placeholder or try capture
+            # Let's use a simpler block splitter for reliability
+            statements = re.split(r'(?=CREATE TABLE)', sql_content)
+            for stmt in statements:
+                match = re.search(regex, stmt, re.IGNORECASE)
+                if match:
+                    # Clean table name (remove brackets)
+                    tbl_name = match.group(1).replace('[', '').replace(']', '')
+                    ddl_map[tbl_name] = stmt.strip()
+                    
     except Exception as e: print(f"Warning parsing DDL: {e}")
 
 # --- Process CSV ---
@@ -55,31 +71,39 @@ try:
             # FIX: Use safe_str to prevent NoneType error
             t_name = safe_str(row.get('Table', ''))
             
-            # Skip invalid rows (e.g. from sqlcmd output messages or empty lines)
-            if not t_name or "changed database context" in t_name.lower():
+            # --- FIX: JUNK ROW FILTER ---
+            # Filter out MSSQL error messages leaking into CSV
+            t_name_lower = t_name.lower()
+            if not t_name or \
+               t_name_lower.startswith("msg ") or \
+               t_name_lower.startswith("level ") or \
+               "changed database context" in t_name_lower or \
+               "rows affected" in t_name_lower or \
+               t_name_lower == "table": # Header repetition
                 continue
             
-            try: total = int(row.get('Total_Rows', 0))
+            try: total = int(float(row.get('Total_Rows', 0) or 0))
             except: total = 0
-            try: size = float(row.get('Table_Size_MB', 0))
+            try: size = float(row.get('Table_Size_MB', 0) or 0)
             except: size = 0.0
-            try: nulls = int(row.get('Null_Count', 0))
+            try: nulls = int(float(row.get('Null_Count', 0) or 0))
             except: nulls = 0
-            try: empties = int(row.get('Empty_Count', 0))
+            try: empties = int(float(row.get('Empty_Count', 0) or 0))
             except: empties = 0
-            try: zeros = int(row.get('Zero_Count', 0))
+            try: zeros = int(float(row.get('Zero_Count', 0) or 0))
             except: zeros = 0
 
             # Data Composition Logic
             bad_data_count = nulls + empties + zeros
             valid_data_count = total - bad_data_count
             
+            # Avoid division by zero
             null_pct = (nulls / total * 100) if total > 0 else 0
             empty_pct = (empties / total * 100) if total > 0 else 0
             zero_pct = (zeros / total * 100) if total > 0 else 0
             valid_pct = (valid_data_count / total * 100) if total > 0 else 0
             
-            # Completeness Score
+            # Completeness Score (Average for Overview)
             completeness_score = valid_pct
 
             if t_name not in table_stats:
@@ -104,11 +128,12 @@ try:
             elif 'int' in dtype or 'number' in dtype: badge_class = "bg-success"
             elif 'date' in dtype: badge_class = "bg-info text-dark"
             
-            pk_icon = '🔑' if row.get('PK') == 'YES' else ''
+            pk_icon = '🔑' if safe_str(row.get('PK')).upper() == 'YES' else ''
             fk_raw = safe_str(row.get("FK",""))
             fk_icon = ''
             if fk_raw:
-                ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '')
+                # Clean up FK string
+                ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '').replace('[', '').replace(']', '')
                 fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;" class="text-decoration-none">🔗 <span class="fk-detail">{fk_raw}</span></a>'
             
             # 4-Bar Stacked Layout
@@ -135,7 +160,7 @@ try:
 
             detail_rows.append({
                 "table": t_name,
-                "column": f'<span class="{"pk-col" if row.get("PK")=="YES" else ""}">{safe_str(row.get("Column",""))}</span>',
+                "column": f'<span class="{"pk-col" if safe_str(row.get("PK")).upper()=="YES" else ""}">{safe_str(row.get("Column",""))}</span>',
                 "type": f'<span class="badge {badge_class} badge-type">{safe_str(row.get("DataType",""))}</span>',
                 "key": f'{pk_icon} {fk_icon}',
                 "default": f'<span class="default-col">{safe_str(row.get("Default",""))}</span>',
@@ -156,6 +181,7 @@ try:
         if quality < 95: q_color = "text-warning"
         if quality < 80: q_color = "text-danger"
         
+        # DDL Link
         tbl_link = f'<a href="#" onclick="showDDL(\'{t}\'); return false;" class="fw-bold text-primary">{t}</a>'
         
         overview_rows.append({
@@ -224,7 +250,7 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v7.1 Stable</span>
+            <span class="badge bg-primary rounded-pill p-2">v7.0 Robust</span>
         </div>
     </div>
 
@@ -278,13 +304,6 @@ html_content = f"""
                         </ul>
                         <hr>
                         <strong>Table Health Score:</strong> ค่าเฉลี่ยของคะแนนทุกคอลัมน์ในตารางนั้น
-                        <hr>
-                        <strong>🎯 Smart Sample Data (v7.1+):</strong>
-                        <ul>
-                            <li>ตัวอย่างข้อมูล (Sample) จะแสดงเฉพาะค่าที่ <code>NOT NULL</code> และ <code>NOT EMPTY</code></li>
-                            <li>ช่วยให้เห็นข้อมูลที่มีความหมายจริง ไม่แสดงค่าว่างหรือ NULL</li>
-                            <li>ใช้กับทุก Database: MySQL, PostgreSQL, MSSQL</li>
-                        </ul>
                     </div>
                 </div>
                 <div class="col-md-6">

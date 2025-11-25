@@ -170,7 +170,7 @@ def generate_ts_config(params, mappings_df):
 
     # Generate Final Block
     return f"""    // {table_name}
-    this.register({{
+    {{
       name: '{table_name}',
       module: '{module}',
       priority: 50,
@@ -180,7 +180,7 @@ def generate_ts_config(params, mappings_df):
       dependencies: {deps_str},
       mappings: [
 {mappings_str}      ]
-    }});"""
+    }};"""
 
 # --- SAFETY WRAPPER ---
 def safe_data_editor(df, **kwargs):
