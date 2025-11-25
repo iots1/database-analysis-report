@@ -64,11 +64,30 @@ def save_datasource(name, db_type, host, port, dbname, username, password):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
-        c.execute('''INSERT OR REPLACE INTO datasources (name, db_type, host, port, dbname, username, password)
+        c.execute('''INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
                      VALUES (?, ?, ?, ?, ?, ?, ?)''', 
                   (name, db_type, host, port, dbname, username, password))
         conn.commit()
         return True, "Saved successfully"
+    except sqlite3.IntegrityError:
+        return False, f"Datasource name '{name}' already exists."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+def update_datasource(id, name, db_type, host, port, dbname, username, password):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('''UPDATE datasources 
+                     SET name=?, db_type=?, host=?, port=?, dbname=?, username=?, password=?
+                     WHERE id=?''', 
+                  (name, db_type, host, port, dbname, username, password, id))
+        conn.commit()
+        return True, "Updated successfully"
+    except sqlite3.IntegrityError:
+        return False, f"Datasource name '{name}' already exists."
     except Exception as e:
         return False, str(e)
     finally:
@@ -79,6 +98,20 @@ def get_datasources():
     df = pd.read_sql_query("SELECT id, name, db_type, host, dbname, username FROM datasources", conn)
     conn.close()
     return df
+
+def get_datasource_by_id(id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM datasources WHERE id=?", (id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "id": row[0], "name": row[1], "db_type": row[2], 
+            "host": row[3], "port": row[4], "dbname": row[5], 
+            "username": row[6], "password": row[7]
+        }
+    return None
 
 def get_datasource_by_name(name):
     conn = sqlite3.connect(DB_FILE)
@@ -269,6 +302,59 @@ def test_db_connection(db_type, host, db_name, user, password):
         return False, f"Connection Error: {str(e)}"
     return False, "Unknown Database Type"
 
+# --- CALLBACKS (Fix for Edit State) ---
+def load_edit_data(ds_id):
+    """Callback to load data into session state BEFORE widget rendering"""
+    full_data = get_datasource_by_id(ds_id)
+    if full_data:
+        st.session_state.new_ds_name = full_data['name']
+        try:
+            st.session_state.ds_form_type_index = DB_TYPES.index(full_data['db_type'])
+        except:
+            st.session_state.ds_form_type_index = 0
+        st.session_state.new_ds_host = full_data['host']
+        st.session_state.new_ds_port = full_data['port']
+        st.session_state.new_ds_db = full_data['dbname']
+        st.session_state.new_ds_user = full_data['username']
+        st.session_state.new_ds_pass = full_data['password']
+        
+        st.session_state.is_edit_mode = True
+        st.session_state.edit_ds_id = ds_id
+
+# --- DIALOGS (Streamlit 1.35+) ---
+@st.dialog("Confirm Deletion")
+def confirm_delete_dialog(ds_id, ds_name):
+    st.warning(f"Are you sure you want to delete profile: **{ds_name}**?")
+    st.caption("This action cannot be undone.")
+    col1, col2 = st.columns(2)
+    if col1.button("Confirm Delete", type="primary", use_container_width=True):
+        delete_datasource(ds_id)
+        st.success("Deleted!")
+        time.sleep(0.5)
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+@st.dialog("Confirm Update")
+def confirm_update_dialog(id, name, db_type, host, port, db, user, pwd):
+    st.info(f"Update profile: **{name}**?")
+    col1, col2 = st.columns(2)
+    if col1.button("Yes, Update", type="primary", use_container_width=True):
+        ok, msg = update_datasource(id, name, db_type, host, port, db, user, pwd)
+        if ok:
+            st.success("Updated!")
+            # Trigger reset using flag
+            st.session_state.trigger_ds_reset = True
+            # Exit edit mode
+            st.session_state.edit_ds_id = None 
+            st.session_state.is_edit_mode = False
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error(msg)
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
 # --- SAFETY WRAPPER ---
 def safe_data_editor(df, **kwargs):
     try:
@@ -351,7 +437,6 @@ if page == "📊 Schema Mapper":
         col_main, col_detail = st.columns([2, 1])
         columns_list = st.session_state[f"df_{selected_table}"]['Source Column'].tolist()
         
-        # --- EDITOR & LOGIC (Same as before) ---
         default_sb_index = 0 
         editor_key = f"editor_{selected_table}"
         if editor_key in st.session_state and st.session_state[editor_key].get("selection", {}).get("rows"):
@@ -380,7 +465,6 @@ if page == "📊 Schema Mapper":
                 row_data = st.session_state[f"df_{selected_table}"].iloc[row_idx]
                 st.info(f"Target: `{row_data['Target Column']}`")
                 
-                # ... (Tabs for transformers/validators same as before) ...
                 t1, t2 = st.tabs(["Pipeline", "Lookup"])
                 with t1:
                     curr_trans = row_data.get('Transformers', '')
@@ -403,7 +487,6 @@ if page == "📊 Schema Mapper":
         st.markdown("---")
         st.markdown("### 💻 Generated Registry Config (JSON)")
         
-        # Save to DB Section
         col_name, col_act = st.columns([2, 1])
         with col_name:
             config_name_input = st.text_input("Config Name (Unique)", value=f"{selected_table}_config", help="Name to save in SQLite")
@@ -422,14 +505,13 @@ if page == "📊 Schema Mapper":
         json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
         
         with col_act:
-            st.write("") # Spacer
+            st.write("") 
             st.write("")
             if st.button("💾 Save to Project DB", type="secondary", use_container_width=True):
                 success, msg = save_config_to_db(config_name_input, selected_table, json_data)
                 if success: st.success(msg)
                 else: st.error(msg)
 
-        # Download & Preview
         ac_left, ac_right = st.columns([1, 1])
         with ac_left:
             st.download_button("📥 Download JSON File", json_str, f"{selected_table}.json", "application/json", type="primary", use_container_width=True)
@@ -444,13 +526,11 @@ if page == "📊 Schema Mapper":
 elif page == "🚀 Migration Engine":
     st.subheader("🚀 Data Migration Execution Engine")
     
-    # 1. Connection Selection
     with st.expander("🔌 Database Connection Settings", expanded=True):
         datasources = get_datasources()
         
         col_src, col_tgt = st.columns(2)
         
-        # Source Selection
         with col_src:
             st.markdown("#### Source Database")
             src_options = ["Custom Connection"] + datasources['name'].tolist()
@@ -477,7 +557,6 @@ elif page == "🚀 Migration Engine":
                     if ok: st.success(msg)
                     else: st.error(msg)
 
-        # Target Selection
         with col_tgt:
             st.markdown("#### Target Database")
             tgt_options = ["Custom Connection"] + datasources['name'].tolist()
@@ -504,7 +583,6 @@ elif page == "🚀 Migration Engine":
                     if ok: st.success(msg)
                     else: st.error(msg)
 
-    # 2. Config Selection
     st.divider()
     st.markdown("#### 📄 Load Configuration")
     
@@ -530,12 +608,10 @@ elif page == "🚀 Migration Engine":
         with st.expander("Preview Selected Config"):
             st.json(config_data, expanded=False)
 
-    # 3. Execution (Simulation)
     st.divider()
     st.markdown("#### ⚙️ Execution")
     if st.button("🚀 Start Migration", type="primary", disabled=(config_data is None), use_container_width=True):
         st.success("Migration Started... (See logs)")
-        # ... (Same simulation logic as before) ...
         progress_bar = st.progress(0)
         time.sleep(1)
         progress_bar.progress(100)
@@ -548,36 +624,93 @@ elif page == "⚙️ Datasource & Config":
     tab_ds, tab_conf = st.tabs(["🔌 Datasources", "📄 Saved Configs"])
     
     with tab_ds:
-        st.markdown("#### Add New Datasource")
-        with st.form("add_ds_form"):
+        # --- RESET LOGIC ---
+        if st.session_state.get("trigger_ds_reset", False):
+            st.session_state.new_ds_name = ""
+            st.session_state.new_ds_host = ""
+            st.session_state.new_ds_port = ""
+            st.session_state.new_ds_db = ""
+            st.session_state.new_ds_user = ""
+            st.session_state.new_ds_pass = ""
+            st.session_state.ds_form_type_index = 0
+            st.session_state.trigger_ds_reset = False
+
+        # State Management
+        if "new_ds_name" not in st.session_state: st.session_state.new_ds_name = ""
+        if "new_ds_host" not in st.session_state: st.session_state.new_ds_host = ""
+        if "new_ds_port" not in st.session_state: st.session_state.new_ds_port = ""
+        if "new_ds_db" not in st.session_state: st.session_state.new_ds_db = ""
+        if "new_ds_user" not in st.session_state: st.session_state.new_ds_user = ""
+        if "new_ds_pass" not in st.session_state: st.session_state.new_ds_pass = ""
+        if "ds_form_type_index" not in st.session_state: st.session_state.ds_form_type_index = 0
+        if "is_edit_mode" not in st.session_state: st.session_state.is_edit_mode = False
+        if "edit_ds_id" not in st.session_state: st.session_state.edit_ds_id = None
+
+        form_title = "Update Datasource" if st.session_state.is_edit_mode else "Add New Datasource"
+        st.markdown(f"#### {form_title}")
+        
+        with st.container(border=True):
             c1, c2 = st.columns(2)
-            ds_name = c1.text_input("Profile Name (Unique)")
-            ds_type = c2.selectbox("Type", DB_TYPES)
+            ds_name = c1.text_input("Profile Name (Unique)", key="new_ds_name")
+            ds_type = c2.selectbox("Type", DB_TYPES, index=st.session_state.ds_form_type_index, key="new_ds_type")
             c3, c4 = st.columns(2)
-            ds_host = c3.text_input("Host")
-            ds_port = c4.text_input("Port (Optional)")
+            ds_host = c3.text_input("Host", key="new_ds_host")
+            ds_port = c4.text_input("Port (Optional)", key="new_ds_port")
             c5, c6, c7 = st.columns(3)
-            ds_db = c5.text_input("DB Name")
-            ds_user = c6.text_input("Username")
-            ds_pass = c7.text_input("Password", type="password")
+            ds_db = c5.text_input("DB Name", key="new_ds_db")
+            ds_user = c6.text_input("Username", key="new_ds_user")
+            ds_pass = c7.text_input("Password", type="password", key="new_ds_pass")
             
-            if st.form_submit_button("Save Datasource"):
-                if ds_name and ds_host:
-                    ok, msg = save_datasource(ds_name, ds_type, ds_host, ds_port, ds_db, ds_user, ds_pass)
-                    if ok: st.success("Saved!"); st.rerun()
-                    else: st.error(msg)
-                else:
-                    st.error("Name and Host are required.")
+            b1, b2 = st.columns([1, 4])
+            if st.session_state.is_edit_mode:
+                if b1.button("Update Profile", type="primary", use_container_width=True):
+                    if ds_name and ds_host:
+                        confirm_update_dialog(st.session_state.edit_ds_id, ds_name, ds_type, ds_host, ds_port, ds_db, ds_user, ds_pass)
+                    else:
+                        st.error("Name and Host are required.")
+                
+                if b2.button("Cancel Edit"):
+                    st.session_state.trigger_ds_reset = True
+                    st.session_state.is_edit_mode = False
+                    st.session_state.edit_ds_id = None
+                    st.rerun()
+            else:
+                if st.button("Save Datasource", type="primary"):
+                    if ds_name and ds_host:
+                        ok, msg = save_datasource(ds_name, ds_type, ds_host, ds_port, ds_db, ds_user, ds_pass)
+                        if ok:
+                            st.success("Saved!")
+                            st.session_state.trigger_ds_reset = True
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    else:
+                        st.error("Name and Host are required.")
 
         st.markdown("#### Existing Datasources")
         ds_df = get_datasources()
+        
         if not ds_df.empty:
-            st.dataframe(ds_df, use_container_width=True)
-            # Simple delete UI
-            del_id = st.selectbox("Select ID to Delete", ds_df['id'])
-            if st.button("Delete Datasource"):
-                delete_datasource(del_id)
-                st.rerun()
+            h1, h2, h3, h4 = st.columns([2, 1, 3, 2])
+            h1.markdown("**Name**")
+            h2.markdown("**Type**")
+            h3.markdown("**Host**")
+            h4.markdown("**Actions**")
+            st.divider()
+            
+            for index, row in ds_df.iterrows():
+                r1, r2, r3, r4 = st.columns([2, 1, 3, 2])
+                with r1: st.write(row['name'])
+                with r2: st.caption(row['db_type'])
+                with r3: st.code(f"{row['username']}@{row['host']}/{row['dbname']}")
+                with r4:
+                    c_edit, c_del = st.columns(2)
+                    # FIX: Use on_click for Edit to avoid session state write error
+                    c_edit.button("✏️", key=f"edit_{row['id']}", help="Edit Profile", on_click=load_edit_data, args=(row['id'],))
+                    
+                    if c_del.button("🗑️", key=f"del_{row['id']}", help="Delete Profile"):
+                        confirm_delete_dialog(row['id'], row['name'])
+                st.divider()
         else:
             st.info("No datasources defined.")
 
