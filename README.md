@@ -172,6 +172,8 @@ cd ..
 
 # Start Streamlit dashboard
 streamlit run app.py --server.runOnSave true
+# or
+streamlit run app.py
 ```
 
 **Access**: Opens browser at http://localhost:8501
@@ -184,16 +186,16 @@ streamlit run app.py --server.runOnSave true
 
 #### Basic Settings
 
-| Field | Description | Example |
-|-------|-------------|---------|
-| `type` | Database type | `mysql`, `postgresql`, `mssql` |
-| `host` | Database host | `localhost`, `192.168.1.100` |
-| `port` | Database port | `3306`, `5432`, `1433` |
-| `name` | Database name | `hospital_db` |
-| `user` | Username | `admin` |
-| `password` | Password | `secure_password` |
-| `schema` | Schema name (optional) | `public`, `dbo` |
-| `tables` | Specific tables (optional) | `["patients", "visits"]` |
+| Field      | Description                | Example                        |
+| ---------- | -------------------------- | ------------------------------ |
+| `type`     | Database type              | `mysql`, `postgresql`, `mssql` |
+| `host`     | Database host              | `localhost`, `192.168.1.100`   |
+| `port`     | Database port              | `3306`, `5432`, `1433`         |
+| `name`     | Database name              | `hospital_db`                  |
+| `user`     | Username                   | `admin`                        |
+| `password` | Password                   | `secure_password`              |
+| `schema`   | Schema name (optional)     | `public`, `dbo`                |
+| `tables`   | Specific tables (optional) | `["patients", "visits"]`       |
 
 #### Schema Support (v7.0+)
 
@@ -210,18 +212,19 @@ Specify database schema for PostgreSQL and MSSQL:
 ```
 
 **Defaults**:
+
 - PostgreSQL: `public`
 - MSSQL: `dbo`
 - MySQL: Not applicable
 
 #### Sampling Configuration
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `default_limit` | Number of sample rows | `10` |
-| `max_text_length` | Max characters for text fields | `300` |
-| `deep_analysis` | Enable detailed statistics | `true` |
-| `exceptions` | Per-column overrides | `[]` |
+| Parameter         | Description                    | Default |
+| ----------------- | ------------------------------ | ------- |
+| `default_limit`   | Number of sample rows          | `10`    |
+| `max_text_length` | Max characters for text fields | `300`   |
+| `deep_analysis`   | Enable detailed statistics     | `true`  |
+| `exceptions`      | Per-column overrides           | `[]`    |
 
 #### Exception Rules
 
@@ -250,6 +253,7 @@ cd analysis_report
 ```
 
 **Features**:
+
 - Auto-detects database type from `config.json`
 - Checks and installs missing dependencies (macOS with Homebrew)
 - Exports DDL schema to `schema.sql`
@@ -258,6 +262,7 @@ cd analysis_report
 - Logs all operations to `process.log`
 
 **Output Structure**:
+
 ```
 migration_report/20251124_0023/
 ├── ddl_schema/
@@ -273,6 +278,7 @@ migration_report/20251124_0023/
 The dashboard provides several interfaces:
 
 #### 📊 **Schema Mapper**
+
 - Load analysis reports
 - View table and column statistics
 - Map source to target fields
@@ -280,11 +286,13 @@ The dashboard provides several interfaces:
 - Generate TypeScript/JSON configurations
 
 #### 🔍 **DDL Explorer**
+
 - Browse database schema
 - Click tables to view CREATE statements
 - Navigate foreign key relationships
 
 #### 🎲 **Mock Data Generator**
+
 - Generate test data for migration testing
 - Configurable data volumes
 - Realistic HIS data patterns
@@ -336,11 +344,13 @@ flowchart TD
 ### Step-by-Step Migration Process
 
 1. **Database Analysis**
+
    - Configure `config.json` with source database credentials
    - Run `./unified_db_analyzer.sh`
    - Review generated reports
 
 2. **Schema Mapping**
+
    - Launch Streamlit dashboard
    - Navigate to **Schema Mapper**
    - Load analysis report
@@ -348,6 +358,7 @@ flowchart TD
    - Select transformers (e.g., date format converters, string normalizers)
 
 3. **Configuration Export**
+
    - Generate TypeScript/JSON configuration
    - Integrate with migration pipeline
    - Test with mock data if needed
@@ -375,17 +386,18 @@ Enable comprehensive data profiling:
 
 **Metrics Collected**:
 
-| Metric | Basic Mode | Deep Mode |
-|--------|------------|-----------|
-| Row Count | ✅ | ✅ |
-| Null Count | ✅ | ✅ |
-| Distinct Values | ✅ | ✅ |
-| Min/Max Values | ❌ | ✅ |
-| Top 5 Frequency | ❌ | ✅ |
-| Data Composition | ❌ | ✅ (Valid/Null/Empty/Zero) |
-| Sample Data | ✅ | ✅ (Smart filtered) |
+| Metric           | Basic Mode | Deep Mode                  |
+| ---------------- | ---------- | -------------------------- |
+| Row Count        | ✅         | ✅                         |
+| Null Count       | ✅         | ✅                         |
+| Distinct Values  | ✅         | ✅                         |
+| Min/Max Values   | ❌         | ✅                         |
+| Top 5 Frequency  | ❌         | ✅                         |
+| Data Composition | ❌         | ✅ (Valid/Null/Empty/Zero) |
+| Sample Data      | ✅         | ✅ (Smart filtered)        |
 
 **Performance Considerations**:
+
 - **Basic Mode**: Fast, suitable for large tables (millions of rows)
 - **Deep Mode**: Slower, recommended for detailed migration planning
 
@@ -394,11 +406,13 @@ Enable comprehensive data profiling:
 Automatically filters sample data to show only meaningful values:
 
 **Filtering Rules**:
+
 - Excludes `NULL` values
 - Excludes empty strings (`''`)
 - Shows actual representative data
 
 **Implementation** (MySQL example):
+
 ```sql
 SELECT DISTINCT column_name
 FROM table_name
@@ -432,6 +446,7 @@ Generated HTML reports include:
 - **Process Log Tab**: Complete execution logs
 
 **Features**:
+
 - Responsive design with Bootstrap 5
 - Interactive tables with search/filter/sort
 - Data quality visualizations
@@ -448,6 +463,7 @@ Generated HTML reports include:
 **Cause**: Outdated Streamlit version (< 1.30.0)
 
 **Solution**:
+
 ```bash
 # Option 1: Use virtual environment (recommended)
 python3 -m venv venv
@@ -464,6 +480,7 @@ pip install --upgrade --force-reinstall streamlit
 **Cause**: Self-signed or untrusted SSL certificate
 
 **Solution**: The toolkit automatically adds `-C` flag to trust server certificates:
+
 ```bash
 sqlcmd -S host,port -C -U user -P password ...
 ```
@@ -479,6 +496,7 @@ sqlcmd -S host,port -C -U user -P password ...
 **Cause**: Incorrect schema name (e.g., using default `public` for MSSQL)
 
 **Solution**: Specify correct schema in `config.json`:
+
 ```json
 {
   "database": {
@@ -534,13 +552,14 @@ ls -lh migration_report/*/data_profile/data_profile.csv
 Approximate analysis times (single table):
 
 | Rows | Columns | Basic Mode | Deep Mode |
-|------|---------|------------|-----------|
-| 10K | 20 | ~2s | ~5s |
-| 100K | 50 | ~10s | ~30s |
-| 1M | 100 | ~30s | ~2min |
-| 10M+ | 200+ | ~2min | ~10min+ |
+| ---- | ------- | ---------- | --------- |
+| 10K  | 20      | ~2s        | ~5s       |
+| 100K | 50      | ~10s       | ~30s      |
+| 1M   | 100     | ~30s       | ~2min     |
+| 10M+ | 200+    | ~2min      | ~10min+   |
 
 **Optimization Tips**:
+
 - Use `tables` filter to analyze specific tables only
 - Disable `deep_analysis` for initial exploration
 - Adjust `default_limit` for faster sampling
@@ -573,6 +592,7 @@ Contributions are welcome! Please follow these guidelines:
 5. Open a Pull Request
 
 **Code Standards**:
+
 - Bash scripts: Follow ShellCheck recommendations
 - Python: PEP 8 style guide
 - Add comments for complex logic
