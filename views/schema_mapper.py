@@ -2,477 +2,519 @@ import streamlit as st
 import pandas as pd
 import os
 import json
+import time
 from config import TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS
 import utils.helpers as helpers
 import database as db
-from services.db_connector import get_tables_from_datasource, get_columns_from_table
+from services.db_connector import get_tables_from_datasource, get_columns_from_table, test_db_connection
 
 def render_schema_mapper_page():
-    st.markdown("## 🗂️ Schema Mapper")
+    # --- HEADER & CONTROLS ---
+    c_title, c_mode = st.columns([3, 1])
+    with c_title:
+        st.markdown("## 🗂️ Schema Mapper")
+    
+    if "mapper_focus_mode" not in st.session_state:
+        st.session_state.mapper_focus_mode = False
 
-    # Load datasources early for use throughout
+    with c_mode:
+        mode_btn_text = "🔍 Enter Focus Mode" if not st.session_state.mapper_focus_mode else "🔙 Exit Focus Mode"
+        mode_btn_type = "secondary" if not st.session_state.mapper_focus_mode else "primary"
+        if st.button(mode_btn_text, type=mode_btn_type, use_container_width=True):
+            st.session_state.mapper_focus_mode = not st.session_state.mapper_focus_mode
+            st.rerun()
+
+    # Load datasources
     datasources_df = db.get_datasources()
-    datasource_names = [] if datasources_df.empty else datasources_df['name'].tolist()
+    datasource_names = ["-- Select Datasource --"] + (datasources_df['name'].tolist() if not datasources_df.empty else [])
 
-    # Initialize session state for source mode
-    if "source_mode" not in st.session_state:
-        st.session_state.source_mode = "Run ID"
-
-    # ==================== SOURCE TABLE CONFIGURATION ====================
-    with st.expander("📥 Source Table Configuration", expanded=True):
-        st.markdown("**Choose source table method:**")
-
-        source_mode = st.radio(
-            "Source Mode",
-            options=["Run ID", "Datasource"],
-            index=0 if st.session_state.source_mode == "Run ID" else 1,
-            key="source_mode_radio",
-            horizontal=True,
-            help="Run ID: Select from analyzed report folders | Datasource: Connect directly to database"
-        )
-        st.session_state.source_mode = source_mode
-
-        st.markdown("---")
-
-        selected_table = None
-        df_raw = None
-        source_db_name = None
-        source_table_name = None
-        source_db_input = None  # Will be set based on mode
-
-        if source_mode == "Run ID":
-            # Original Run ID mode
-            report_folders = helpers.get_report_folders()
-
-            if not report_folders:
-                st.warning("⚠️ No reports found. Please run data profiling first.")
-                return
-
-            col_rid, col_tbl = st.columns(2)
-
-            with col_rid:
-                if "selected_folder_idx" not in st.session_state:
-                    st.session_state.selected_folder_idx = 0
-
-                def update_folder():
-                    st.session_state.selected_folder_idx = report_folders.index(st.session_state.folder_select)
-
-                selected_folder = st.selectbox(
-                    "Run ID",
-                    report_folders,
-                    format_func=lambda x: os.path.basename(x),
-                    key="folder_select",
-                    index=st.session_state.selected_folder_idx,
-                    on_change=update_folder
+    # Session Init
+    if "source_mode" not in st.session_state: st.session_state.source_mode = "Run ID"
+    
+    # Temporary variables for this run
+    selected_table = None
+    df_raw = None
+    source_db_input = None
+    source_table_name = None
+    loaded_config_json = None 
+    
+    # ==================== CONFIGURATION SECTION ====================
+    if not st.session_state.mapper_focus_mode:
+        
+        with st.expander("📥 Source & Configuration", expanded=True):
+            col_src_mode, col_src_sel = st.columns([1, 2])
+            with col_src_mode:
+                source_mode = st.radio(
+                    "Source Mode", 
+                    ["Run ID", "Datasource", "Saved Config", "Upload File"], 
+                    horizontal=True
                 )
+                st.session_state.source_mode = source_mode
 
-                df_raw = load_data_profile(selected_folder)
-                if df_raw is None:
-                    st.error("❌ Could not load data profile.")
-                    return
+            # --- MODE 1: Run ID ---
+            if source_mode == "Run ID":
+                report_folders = helpers.get_report_folders()
+                if report_folders:
+                    with col_src_sel:
+                        c1, c2 = st.columns(2)
+                        sel_folder = c1.selectbox("Run ID", report_folders, format_func=os.path.basename)
+                        df_profile = load_data_profile(sel_folder)
+                        
+                        if df_profile is not None:
+                            tables = df_profile['Table'].unique()
+                            if "sm_sel_table_idx" not in st.session_state: st.session_state.sm_sel_table_idx = 0
+                            try:
+                                sel_table = c2.selectbox("Source Table", tables, index=st.session_state.sm_sel_table_idx)
+                            except:
+                                sel_table = c2.selectbox("Source Table", tables, index=0)
 
-            with col_tbl:
-                tables = df_raw['Table'].unique()
-                if "selected_table_idx" not in st.session_state:
-                    st.session_state.selected_table_idx = 0
-                if st.session_state.selected_table_idx >= len(tables):
-                    st.session_state.selected_table_idx = 0
+                            if sel_table in tables:
+                                st.session_state.sm_sel_table_idx = list(tables).index(sel_table)
 
-                def update_table():
-                    try:
-                        st.session_state.selected_table_idx = list(tables).index(st.session_state.table_select)
-                    except:
-                        st.session_state.selected_table_idx = 0
+                            df_raw = df_profile[df_profile['Table'] == sel_table].copy()
+                            selected_table = sel_table
+                            source_table_name = sel_table
+                            source_db_input = "Run ID (CSV)"
 
-                selected_table = st.selectbox(
-                    "Select Table to Map",
-                    tables,
-                    key="table_select",
-                    index=st.session_state.selected_table_idx,
-                    on_change=update_table
-                )
+            # --- MODE 2: Datasource ---
+            elif source_mode == "Datasource":
+                if datasource_names:
+                    with col_src_sel:
+                        src_ds_name = st.selectbox("Source DB", datasource_names, key="src_ds")
+                        
+                        if src_ds_name != "-- Select Datasource --":
+                            src_ds = db.get_datasource_by_name(src_ds_name)
+                            
+                            if src_ds:
+                                c_status, c_btn = st.columns([3, 1])
+                                status_key = f"conn_status_{src_ds_name}"
+                                if status_key not in st.session_state: st.session_state[status_key] = "unknown"
+                                
+                                with c_status:
+                                    if st.session_state[status_key] == "success":
+                                        st.success(f"🟢 Connected: {src_ds['host']}")
+                                    elif st.session_state[status_key] == "fail":
+                                        st.error(f"🔴 Connection Failed: {src_ds['host']}")
+                                    else:
+                                        st.info(f"⚪ Ready to connect: {src_ds['host']}")
+                                
+                                with c_btn:
+                                    if st.button("📡 Test", key="btn_test_conn"):
+                                        ok, msg = test_db_connection(
+                                            src_ds['db_type'], src_ds['host'], src_ds['port'], 
+                                            src_ds['dbname'], src_ds['username'], src_ds['password']
+                                        )
+                                        if ok:
+                                            st.session_state[status_key] = "success"
+                                            st.rerun()
+                                        else:
+                                            st.session_state[status_key] = "fail"
+                                            st.toast(f"Connection Failed: {msg}")
 
-            source_table_name = selected_table
-            source_db_input = "Run ID (CSV)"  # Set placeholder for config
-            st.success(f"✓ Source: Run ID → Table `{selected_table}`")
+                                if st.session_state[status_key] == "success":
+                                    success, tables = get_tables_from_datasource(
+                                        src_ds['db_type'], src_ds['host'], src_ds['port'], 
+                                        src_ds['dbname'], src_ds['username'], src_ds['password']
+                                    )
+                                    if success:
+                                        if "sm_src_tbl_idx" not in st.session_state: st.session_state.sm_src_tbl_idx = 0
+                                        try:
+                                            sel_table = st.selectbox("Source Table", tables, index=st.session_state.sm_src_tbl_idx, key="src_tbl")
+                                        except:
+                                            sel_table = st.selectbox("Source Table", tables, index=0, key="src_tbl")
+                                        
+                                        if sel_table in tables:
+                                            st.session_state.sm_src_tbl_idx = list(tables).index(sel_table)
 
-        else:  # Datasource mode
-            if not datasource_names:
-                st.warning("⚠️ No datasources configured. Please add datasources in Settings page.")
-                return
+                                        source_db_input = src_ds_name
+                                        source_table_name = sel_table
+                                        
+                                        ok, cols = get_columns_from_table(
+                                            src_ds['db_type'], src_ds['host'], src_ds['port'], 
+                                            src_ds['dbname'], src_ds['username'], src_ds['password'], sel_table
+                                        )
+                                        if ok:
+                                            df_raw = pd.DataFrame({
+                                                'Table': [sel_table]*len(cols),
+                                                'Column': [c['name'] for c in cols],
+                                                'DataType': [c['type'] for c in cols],
+                                                'Sample_Values': [''] * len(cols)
+                                            })
+                                            selected_table = sel_table
 
-            col_ds, col_tbl = st.columns(2)
-
-            with col_ds:
-                if "selected_source_ds_idx" not in st.session_state:
-                    st.session_state.selected_source_ds_idx = 0
-
-                source_db_name = st.selectbox(
-                    "Source Datasource",
-                    options=datasource_names,
-                    index=st.session_state.selected_source_ds_idx,
-                    key="source_datasource_select",
-                    help="Select datasource to connect"
-                )
-                source_db_input = source_db_name  # Use datasource name for config
-
-            with col_tbl:
-                # Load tables from selected datasource
-                source_datasource = db.get_datasource_by_name(source_db_name)
-                if source_datasource:
-                    success, result = get_tables_from_datasource(
-                        source_datasource['db_type'],
-                        source_datasource['host'],
-                        source_datasource['port'],
-                        source_datasource['dbname'],
-                        source_datasource['username'],
-                        source_datasource['password']
-                    )
-
-                    if success and result:
-                        source_tables = result
-                        if "selected_source_table_idx" not in st.session_state:
-                            st.session_state.selected_source_table_idx = 0
-
-                        source_table_name = st.selectbox(
-                            "Source Table",
-                            options=source_tables,
-                            index=st.session_state.selected_source_table_idx,
-                            key="source_table_select",
-                            help=f"{len(source_tables)} tables available"
-                        )
-
-                        # Load columns from source table
-                        success_col, columns_result = get_columns_from_table(
-                            source_datasource['db_type'],
-                            source_datasource['host'],
-                            source_datasource['port'],
-                            source_datasource['dbname'],
-                            source_datasource['username'],
-                            source_datasource['password'],
-                            source_table_name
-                        )
-
-                        if success_col and columns_result:
-                            # Create df_raw from database columns
-                            df_raw = pd.DataFrame({
-                                'Table': [source_table_name] * len(columns_result),
-                                'Column': [col['name'] for col in columns_result],
-                                'DataType': [col['type'] for col in columns_result],
-                                'Sample_Values': [''] * len(columns_result)
-                            })
-                            selected_table = source_table_name
+            # --- MODE 3 & 4: Saved Config / Upload File ---
+            elif source_mode in ["Saved Config", "Upload File"]:
+                with col_src_sel:
+                    config_data = None
+                    if source_mode == "Saved Config":
+                        configs_df = db.get_configs_list()
+                        if not configs_df.empty:
+                            sel_config = st.selectbox("Select Config", configs_df['config_name'])
+                            if sel_config: config_data = db.get_config_content(sel_config)
                         else:
-                            st.error(f"❌ Could not load columns: {columns_result}")
-                            return
-                    else:
-                        st.error(f"❌ Could not load tables: {result}")
-                        return
-                else:
-                    st.error("❌ Datasource not found.")
-                    return
+                            st.warning("No saved configurations found.")
+                    else: 
+                        uploaded_file = st.file_uploader("Upload JSON Config", type=["json"])
+                        if uploaded_file:
+                            try: config_data = json.load(uploaded_file)
+                            except: st.error("Invalid JSON file")
 
-            st.success(f"✓ Source: Datasource `{source_db_name}` → Table `{source_table_name}` ({len(df_raw)} columns)")
+                    if config_data:
+                        loaded_config_json = config_data
+                        src_info = config_data.get('source', {})
+                        src_db_name = src_info.get('database')
+                        src_tbl_name = src_info.get('table')
+                        
+                        if src_db_name and src_tbl_name:
+                            src_ds = db.get_datasource_by_name(src_db_name)
+                            schema_fetched = False
+                            if src_ds:
+                                ok, cols = get_columns_from_table(
+                                    src_ds['db_type'], src_ds['host'], src_ds['port'], 
+                                    src_ds['dbname'], src_ds['username'], src_ds['password'], src_tbl_name
+                                )
+                                if ok:
+                                    st.success(f"✅ Loaded & Synced: {src_tbl_name} (from {src_db_name})")
+                                    df_raw = pd.DataFrame({
+                                        'Table': [src_tbl_name]*len(cols),
+                                        'Column': [c['name'] for c in cols],
+                                        'DataType': [c['type'] for c in cols],
+                                        'Sample_Values': [''] * len(cols)
+                                    })
+                                    schema_fetched = True
+                            
+                            if not schema_fetched:
+                                st.warning(f"⚠️ Offline Mode: Datasource '{src_db_name}' not reachable. Using saved mapping.")
+                                mappings = config_data.get('mappings', [])
+                                if mappings:
+                                    df_raw = pd.DataFrame({
+                                        'Table': [src_tbl_name]*len(mappings),
+                                        'Column': [m['source'] for m in mappings],
+                                        'DataType': ['Unknown'] * len(mappings), 
+                                        'Sample_Values': [''] * len(mappings)
+                                    })
 
-    if selected_table and df_raw is not None:
-        st.markdown("---")
-        init_editor_state(df_raw[df_raw['Table'] == selected_table], selected_table)
+                            if df_raw is not None:
+                                selected_table = src_tbl_name
+                                source_db_input = src_db_name
+                                source_table_name = src_tbl_name
 
-        # ==================== TARGET TABLE CONFIGURATION ====================
-        # Initialize target variables
+        # --- Context Switch Detection ---
+        if selected_table:
+            config_sig = loaded_config_json.get('name', '') if loaded_config_json else ''
+            current_signature = f"{st.session_state.source_mode}|{source_db_input}|{source_table_name}|{config_sig}"
+            last_signature = st.session_state.get("last_mapper_signature", "")
+            
+            if current_signature != last_signature:
+                state_key = f"df_{selected_table}"
+                if state_key in st.session_state:
+                    del st.session_state[state_key]
+                
+                # --- FIX: Reset Target State if not loading a config ---
+                if not loaded_config_json:
+                    st.session_state.mapper_tgt_db = None
+                    st.session_state.mapper_tgt_tbl = None
+                    st.session_state.mapper_real_tgt_cols = []
+                # ----------------------------------------------------
+
+                st.session_state.mapper_editor_ver = time.time()
+                st.session_state.last_mapper_signature = current_signature
+
+            st.session_state.mapper_active_table = selected_table
+            st.session_state.mapper_df_raw = df_raw
+            st.session_state.mapper_source_db = source_db_input
+            st.session_state.mapper_source_tbl = source_table_name
+            
+            if loaded_config_json:
+                st.session_state.mapper_loaded_config = loaded_config_json
+                st.session_state.mapper_tgt_db = loaded_config_json.get('target', {}).get('database')
+                st.session_state.mapper_tgt_tbl = loaded_config_json.get('target', {}).get('table')
+            else:
+                 st.session_state.mapper_loaded_config = None
+
+    # ==================== MAPPING LOGIC ====================
+    active_table = st.session_state.get("mapper_active_table")
+    active_df_raw = st.session_state.get("mapper_df_raw")
+    loaded_config = st.session_state.get("mapper_loaded_config")
+
+    if active_table and active_df_raw is not None:
+        
         target_db_input = None
         target_table_input = None
-        module_input = "patient"
-        dependencies_input = []
+        real_target_columns = []
+        
+        default_tgt_db = st.session_state.get("mapper_tgt_db")
+        default_tgt_tbl = st.session_state.get("mapper_tgt_tbl")
 
-        with st.expander("📤 Target Table Configuration", expanded=True):
-            if not datasource_names:
-                st.warning("⚠️ No datasources configured. Please add datasources in Settings page.")
-            else:
-                st.markdown("**Configure target database and table:**")
-
-                col_tgt_ds, col_tgt_tbl = st.columns(2)
-
-                with col_tgt_ds:
-                    # Target DB dropdown
-                    target_db_index = 0
-                    if f"target_db_{selected_table}" in st.session_state and st.session_state[f"target_db_{selected_table}"] in datasource_names:
-                        target_db_index = datasource_names.index(st.session_state[f"target_db_{selected_table}"])
-
-                    target_db_input = st.selectbox(
-                        "Target Datasource",
-                        options=datasource_names,
-                        index=target_db_index,
-                        key=f"tgt_{selected_table}",
-                        help="Select target datasource"
-                    )
-
-                with col_tgt_tbl:
-                    # Load tables from target datasource
-                    target_datasource = db.get_datasource_by_name(target_db_input)
-                    if target_datasource:
-                        success, result = get_tables_from_datasource(
-                            target_datasource['db_type'],
-                            target_datasource['host'],
-                            target_datasource['port'],
-                            target_datasource['dbname'],
-                            target_datasource['username'],
-                            target_datasource['password']
+        # --- Target Configuration ---
+        if not st.session_state.mapper_focus_mode:
+            st.markdown("---")
+            with st.expander("📤 Target Table Configuration", expanded=True):
+                c_tgt_1, c_tgt_2 = st.columns(2)
+                
+                tgt_idx = 0
+                if default_tgt_db in datasource_names:
+                    tgt_idx = datasource_names.index(default_tgt_db)
+                
+                target_db_input = c_tgt_1.selectbox("Target Datasource", datasource_names, index=tgt_idx, key="tgt_ds")
+                
+                # --- FIX: Only allow selecting table if Datasource is selected ---
+                if target_db_input and target_db_input != "-- Select Datasource --":
+                    tgt_ds = db.get_datasource_by_name(target_db_input)
+                    if tgt_ds:
+                        ok, res = get_tables_from_datasource(
+                            tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                            tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
                         )
-
-                        if success and result:
-                            target_tables = result
-                            target_table_index = 0
-                            if selected_table in target_tables:
-                                target_table_index = target_tables.index(selected_table)
-
-                            target_table_input = st.selectbox(
-                                "Target Table",
-                                options=target_tables,
-                                index=target_table_index,
-                                key=f"tbl_{selected_table}",
-                                help=f"{len(target_tables)} tables available"
-                            )
+                        if ok: 
+                            target_tables = res
+                            # Select Table Logic
+                            def_tbl_idx = target_tables.index(default_tgt_tbl) if (default_tgt_tbl and default_tgt_tbl in target_tables) else (target_tables.index(active_table) if active_table in target_tables else 0)
+                            target_table_input = c_tgt_2.selectbox("Target Table", target_tables, index=def_tbl_idx, key="tgt_tbl_sel")
                         else:
-                            st.warning(f"⚠️ Could not load tables: {result}")
-                            target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
-                    else:
-                        target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
-
-                st.success(f"✓ Target: Datasource `{target_db_input}` → Table `{target_table_input}`")
-
-        # ==================== GENERAL CONFIGURATION ====================
-        with st.expander("⚙️ General Configuration", expanded=False):
-            col_mod, col_dep = st.columns(2)
-
-            with col_mod:
-                module_input_value = st.text_input(
-                    "Module",
-                    value="patient",
-                    key=f"mod_{selected_table}",
-                    help="Module name for organizing configurations"
-                )
-                module_input = module_input_value  # Update the outer scope variable
-
-            with col_dep:
-                all_tables = df_raw['Table'].unique().tolist()
-                dependencies_input_value = st.multiselect(
-                    "Dependencies",
-                    options=all_tables,
-                    key=f"dep_{selected_table}",
-                    help="Tables that must be processed before this one"
-                )
-                dependencies_input = dependencies_input_value  # Update the outer scope variable
-
-        st.markdown("### 📋 Field Mapping")
-        
-        col_main, col_detail = st.columns([2, 1])
-        columns_list = st.session_state[f"df_{selected_table}"]['Source Column'].tolist()
-        
-        default_sb_index = 0 
-        editor_key = f"editor_{selected_table}"
-        if editor_key in st.session_state and st.session_state[editor_key].get("selection", {}).get("rows"):
-            default_sb_index = st.session_state[editor_key]["selection"]["rows"][0]
-            if default_sb_index >= len(columns_list): default_sb_index = 0
-
-        with col_main:
-            edited_df = safe_data_editor(
-                st.session_state[f"df_{selected_table}"],
-                column_config={
-                    "Source Column": st.column_config.TextColumn(disabled=True),
-                    "Type": st.column_config.TextColumn(disabled=True, width="small"),
-                    "Sample": st.column_config.TextColumn(disabled=True, width="medium"),
-                },
-                use_container_width=True, hide_index=True, num_rows="fixed", key=editor_key, height=500, selection_mode="single-row", on_select="rerun"
-            )
-            if not edited_df.equals(st.session_state[f"df_{selected_table}"]):
-                st.session_state[f"df_{selected_table}"] = edited_df
-                st.rerun()
-
-        with col_detail:
-            st.subheader("✏️ Field Settings")
-            col_to_edit = st.selectbox("Select Field", columns_list, index=default_sb_index, key="sb_field_selector")
-            if col_to_edit:
-                row_idx = st.session_state[f"df_{selected_table}"].index[st.session_state[f"df_{selected_table}"]['Source Column'] == col_to_edit].tolist()[0]
-                row_data = st.session_state[f"df_{selected_table}"].iloc[row_idx]
-
-                # Get target column suggestions from target table
-                target_column_suggestions = []
-                if datasource_names and target_db_input and target_table_input:
-                    target_datasource = db.get_datasource_by_name(target_db_input)
-                    if target_datasource:
-                        success, columns_result = get_columns_from_table(
-                            target_datasource['db_type'],
-                            target_datasource['host'],
-                            target_datasource['port'],
-                            target_datasource['dbname'],
-                            target_datasource['username'],
-                            target_datasource['password'],
-                            target_table_input
+                            # Fallback if fetch fails
+                            target_table_input = c_tgt_2.text_input("Target Table", value=default_tgt_tbl if default_tgt_tbl else active_table, key="tgt_tbl_txt")
+                    
+                    # Fetch Target Columns for validation
+                    if target_table_input:
+                        ok, cols = get_columns_from_table(
+                            tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                            tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password'], target_table_input
                         )
-                        if success and columns_result:
-                            target_column_suggestions = [col['name'] for col in columns_result]
-
-                # Target Column input with suggestions
-                current_target = row_data.get('Target Column', '')
-                if target_column_suggestions:
-                    if current_target not in target_column_suggestions:
-                        target_column_suggestions.insert(0, current_target)
-
-                    target_col_index = 0
-                    if current_target in target_column_suggestions:
-                        target_col_index = target_column_suggestions.index(current_target)
-
-                    new_target_column = st.selectbox(
-                        "Target Column",
-                        options=target_column_suggestions,
-                        index=target_col_index,
-                        key=f"tgt_col_{row_idx}",
-                        help="Select from target table columns"
-                    )
+                        if ok: real_target_columns = [c['name'] for c in cols]
+                        
                 else:
-                    new_target_column = st.text_input(
-                        "Target Column",
-                        value=current_target,
-                        key=f"tgt_col_{row_idx}"
-                    )
+                    # --- FIX: Disable input if no datasource selected ---
+                    target_table_input = c_tgt_2.text_input("Target Table", value="", placeholder="Please select datasource first", disabled=True, key="tgt_tbl_disabled")
+            
+            st.session_state.mapper_tgt_db = target_db_input
+            st.session_state.mapper_tgt_tbl = target_table_input
+            st.session_state.mapper_real_tgt_cols = real_target_columns
+        else:
+            target_db_input = st.session_state.get("mapper_tgt_db")
+            target_table_input = st.session_state.get("mapper_tgt_tbl")
+            real_target_columns = st.session_state.get("mapper_real_tgt_cols", [])
+            st.info(f"🔎 Focus Mode: `{active_table}` -> `{target_table_input}`")
 
-                t1, t2 = st.tabs(["Pipeline", "Lookup"])
-                with t1:
-                    curr_trans = row_data.get('Transformers', '')
-                    def_trans = [t.strip() for t in str(curr_trans).split(', ') if t.strip() in TRANSFORMER_OPTIONS]
-                    new_trans = st.multiselect("Transformers", TRANSFORMER_OPTIONS, default=def_trans, key=f"ms_t_{row_idx}")
-                    curr_val = row_data.get('Validators', '')
-                    def_val = [v.strip() for v in str(curr_val).split(', ') if v.strip() in VALIDATOR_OPTIONS]
-                    new_val = st.multiselect("Validators", VALIDATOR_OPTIONS, default=def_val, key=f"ms_v_{row_idx}")
-                with t2:
-                    new_lookup_table = st.text_input("Lookup Table", value=helpers.safe_str(row_data.get('Lookup Table', '')), key=f"txt_lt_{row_idx}")
-                    new_lookup_by = st.text_input("Lookup By", value=helpers.safe_str(row_data.get('Lookup By', '')), key=f"txt_lb_{row_idx}")
+        # Initialize Editor
+        init_editor_state(active_df_raw, active_table, loaded_config)
 
-                if st.button("Apply", type="primary", use_container_width=True, key=f"btn_{row_idx}"):
-                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Target Column'] = new_target_column
-                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Transformers'] = ", ".join(new_trans)
-                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Validators'] = ", ".join(new_val)
-                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Lookup Table'] = new_lookup_table
-                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Lookup By'] = new_lookup_by
-                    st.rerun()
+        # Main Grid
+        if not st.session_state.mapper_focus_mode:
+            st.markdown("### 📋 Field Mapping")
+            st.caption("Double-click cells to edit directly.")
+        
+        grid_height = 700 if st.session_state.mapper_focus_mode else 500
+        editor_ver = st.session_state.get("mapper_editor_ver", "v1")
+        source_context = st.session_state.mapper_source_db if st.session_state.mapper_source_db else "unknown"
+        unique_editor_key = f"editor_{source_context}_{active_table}_{editor_ver}"
 
+        edited_df = st.data_editor(
+            st.session_state[f"df_{active_table}"],
+            column_config={
+                "Status": st.column_config.TextColumn("Status", disabled=True, width="small", help="Validation Status"),
+                "Source Column": st.column_config.TextColumn("Source", disabled=True),
+                "Type": st.column_config.TextColumn("Type", disabled=True, width="small"),
+                "Target Column": st.column_config.TextColumn("Target Column", width="medium", required=True),
+                "Transformers": st.column_config.TextColumn("Transformers", width="medium"),
+                "Validators": st.column_config.TextColumn("Validators", width="medium"),
+                "Ignore": st.column_config.CheckboxColumn("Ignore", default=False)
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            height=grid_height,
+            key=unique_editor_key
+        )
+
+        if not edited_df.equals(st.session_state[f"df_{active_table}"]):
+            st.session_state[f"df_{active_table}"] = edited_df
+
+        # ==================== BOTTOM CONTROLS ====================
         st.markdown("---")
-        st.markdown("### 💻 Generated Registry Config (JSON)")
+        default_config_name = f"{active_table}_config"
+        is_edit_existing = False
+        if loaded_config and loaded_config.get('name'):
+             default_config_name = loaded_config.get('name')
+             is_edit_existing = (st.session_state.source_mode == "Saved Config")
         
-        col_name, col_act = st.columns([2, 1])
-        with col_name:
-            config_name_input = st.text_input("Config Name (Unique)", value=f"{selected_table}_config", help="Name to save in SQLite")
+        col_validate, col_save = st.columns([1, 2])
         
-        params = {
-            "config_name": config_name_input,
-            "table_name": selected_table,
-            "module": module_input,
-            "source_db": source_db_input,
-            "target_db": target_db_input,
-            "target_table": target_table_input,
-            "dependencies": dependencies_input
-        }
-        
-        json_data = generate_json_config(params, st.session_state[f"df_{selected_table}"])
-        json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
-        
-        with col_act:
+        with col_validate:
             st.write("") 
-            st.write("")
-            if st.button("💾 Save to Project DB", type="secondary", use_container_width=True):
-                success, msg = db.save_config_to_db(config_name_input, selected_table, json_data)
+            if st.button("🔍 Validate Targets", use_container_width=True):
+                if not target_db_input or target_db_input == "-- Select Datasource --":
+                     st.warning("⚠️ Please select a Target Datasource first.")
+                else:
+                    tgt_ds = db.get_datasource_by_name(target_db_input)
+                    if tgt_ds:
+                        with st.spinner(f"Connecting to Target ({target_db_input})..."):
+                            is_connected, conn_msg = test_db_connection(
+                                tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                                tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
+                            )
+                        
+                        if not is_connected:
+                             st.error(f"❌ Cannot connect to Target DB: {conn_msg}")
+                        else:
+                            with st.spinner(f"Fetching columns for '{target_table_input}'..."):
+                                ok, cols = get_columns_from_table(
+                                    tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                                    tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password'], target_table_input
+                                )
+                                
+                                if ok:
+                                    real_target_columns = [c['name'] for c in cols]
+                                    updated_df = validate_mapping_in_table(st.session_state[f"df_{active_table}"], real_target_columns)
+                                    st.session_state[f"df_{active_table}"] = updated_df
+                                    st.session_state.mapper_editor_ver = time.time() 
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ Connection OK, but cannot fetch columns: {cols}")
+                    else:
+                        st.error("Target Datasource configuration not found.")
+
+        with col_save:
+            def do_save(save_name):
+                params = {
+                    "config_name": save_name,
+                    "table_name": active_table,
+                    "module": loaded_config.get('module', 'patient') if loaded_config else 'patient',
+                    "source_db": st.session_state.get("mapper_source_db"),
+                    "target_db": target_db_input,
+                    "target_table": target_table_input,
+                    "dependencies": []
+                }
+                json_data = generate_json_config(params, edited_df)
+                success, msg = db.save_config_to_db(params['config_name'], active_table, json_data)
                 if success: st.success(msg)
                 else: st.error(msg)
+            
+            if is_edit_existing:
+                c_ovr, c_new = st.columns([1, 1.5])
+                with c_ovr:
+                     st.write("") 
+                     st.write("") 
+                     if st.button(f"💾 Save (Overwrite)", type="primary", use_container_width=True, help=f"Update '{default_config_name}'"):
+                        do_save(default_config_name)
+                with c_new:
+                    new_name_input = st.text_input("New Config Name", value=f"{default_config_name}_copy", label_visibility="visible")
+                    if st.button("🆕 Save as New", use_container_width=True):
+                         do_save(new_name_input)
+            else:
+                c_input, c_btn = st.columns([2, 1])
+                with c_input:
+                    save_name_input = st.text_input("Config Name", value=default_config_name, label_visibility="visible")
+                with c_btn:
+                    st.write("") 
+                    st.write("") 
+                    if st.button("💾 Save Configuration", type="primary", use_container_width=True):
+                        do_save(save_name_input)
 
-        ac_left, ac_right = st.columns([1, 1])
-        with ac_left:
-            st.download_button("📥 Download JSON File", json_str, f"{selected_table}.json", "application/json", type="primary", use_container_width=True)
-        with ac_right:
-            is_expanded = st.toggle("Expand JSON Tree", value=True)
+# --- Helpers ---
 
-        t_tree, t_raw = st.tabs(["🌳 Tree View", "📄 Raw / Copy"])
-        with t_tree: st.json(json_data, expanded=is_expanded)
-        with t_raw: st.code(json_str, language="json")
-
-# --- Internal Helpers for this View ---
-@st.cache_data
-def load_data_profile(report_folder):
-    csv_path = os.path.join(report_folder, "data_profile", "data_profile.csv")
-    if os.path.exists(csv_path): 
-        try:
-            return pd.read_csv(csv_path, on_bad_lines='skip')
-        except:
-            return None
-    return None
-
-def init_editor_state(df, table_name):
+def init_editor_state(df, table_name, config_json=None):
     state_key = f"df_{table_name}"
     if state_key not in st.session_state:
+        mapping_dict = {}
+        if config_json:
+            for m in config_json.get('mappings', []):
+                mapping_dict[m['source']] = m
+        
         editor_data = []
         for _, row in df.iterrows():
             src_col = row.get('Column', '')
             dtype = row.get('DataType', '')
-            target_col = helpers.to_camel_case(src_col)
             
+            target_col = helpers.to_snake_case(src_col)
             transformers = []
             validators = []
+            ignore = False
             
-            dtype_str = helpers.safe_str(dtype).lower()
-            if "char" in dtype_str or "text" in dtype_str: transformers.append("TRIM")
-            if "date" in dtype_str:
-                transformers.append("BUDDHIST_TO_ISO")
-                validators.append("VALID_DATE")
-            
-            src_lower = helpers.safe_str(src_col).lower()
-            if src_lower == "hn": transformers = ["UPPER_TRIM"]; validators = ["HN_FORMAT"]
-            if src_lower == "cid": transformers = ["TRIM"]; validators = ["THAI_ID"]
+            if src_col in mapping_dict:
+                rule = mapping_dict[src_col]
+                target_col = rule.get('target', target_col)
+                if 'transformers' in rule:
+                    transformers = rule['transformers']
+                if 'validators' in rule:
+                    validators = rule['validators']
+            elif not config_json: 
+                if "date" in str(dtype).lower(): 
+                    transformers.append("BUDDHIST_TO_ISO")
+                    validators.append("VALID_DATE")
             
             editor_data.append({
-                "Source Column": src_col, "Type": dtype, "Target Column": target_col,
-                "Transformers": ", ".join(transformers), "Validators": ", ".join(validators),
-                "Required": False, "Ignore": False, "Lookup Table": "", "Lookup By": "",
-                "Sample": helpers.safe_str(row.get('Sample_Values', ''))[:50]
+                "Status": "",
+                "Source Column": src_col, 
+                "Type": dtype, 
+                "Target Column": target_col,
+                "Transformers": ", ".join(transformers), 
+                "Validators": ", ".join(validators),
+                "Required": False, 
+                "Ignore": ignore
             })
         st.session_state[state_key] = pd.DataFrame(editor_data)
 
-def safe_data_editor(df, **kwargs):
-    try: return st.data_editor(df, **kwargs)
-    except TypeError:
-        unsafe_args = ['selection_mode', 'on_select']
-        clean_kwargs = {k: v for k, v in kwargs.items() if k not in unsafe_args}
-        return st.data_editor(df, **clean_kwargs)
+def validate_mapping_in_table(df_mapping, real_columns):
+    if not real_columns:
+        return df_mapping
+
+    df_mapping['Status'] = ""
+    valid_count = 0
+    invalid_count = 0
+    
+    for idx, row in df_mapping.iterrows():
+        tgt = row['Target Column']
+        ignore = row.get('Ignore', False)
+        
+        if ignore:
+            df_mapping.at[idx, 'Status'] = "⚪ Skip"
+            continue
+            
+        if not tgt:
+             df_mapping.at[idx, 'Status'] = "⚠️ Empty"
+             continue
+
+        if tgt in real_columns:
+            df_mapping.at[idx, 'Status'] = "✅ OK"
+            valid_count += 1
+        else:
+            df_mapping.at[idx, 'Status'] = "❌ Invalid"
+            invalid_count += 1
+    
+    if invalid_count > 0:
+        st.toast(f"Validation Finished: {invalid_count} errors found.", icon="❌")
+    else:
+        st.toast(f"Validation Finished: All {valid_count} columns valid.", icon="✅")
+        
+    return df_mapping
+
+def load_data_profile(report_folder):
+    csv_path = os.path.join(report_folder, "data_profile", "data_profile.csv")
+    if os.path.exists(csv_path): 
+        try: return pd.read_csv(csv_path, on_bad_lines='skip')
+        except: return None
+    return None
 
 def generate_json_config(params, mappings_df):
     config_data = {
         "name": params['config_name'],
         "module": params['module'],
-        "priority": 50,
         "source": {"database": params['source_db'], "table": params['table_name']},
         "target": {"database": params['target_db'], "table": params['target_table']},
-        "batchSize": 5000,
-        "dependencies": params['dependencies'] if params['dependencies'] else [],
         "mappings": []
     }
     for _, row in mappings_df.iterrows():
-        if row['Ignore']: continue
-        mapping_item = {"source": row['Source Column'], "target": row['Target Column']}
+        if row.get('Ignore', False): continue
         
-        t_val = row.get('Transformers')
-        if t_val and helpers.safe_str(t_val):
-            t_list = [t.strip() for t in str(t_val).split(',') if t.strip()]
-            if t_list: mapping_item["transformers"] = t_list
-
-        v_val = row.get('Validators')
-        if v_val and helpers.safe_str(v_val):
-            v_list = [v.strip() for v in str(v_val).split(',') if v.strip()]
-            if v_list: mapping_item["validators"] = v_list
-
-        if row.get('Lookup Table') and helpers.safe_str(row.get('Lookup Table')):
-             mapping_item["lookupTable"] = row['Lookup Table']
-        if row.get('Lookup By') and helpers.safe_str(row.get('Lookup By')):
-             mapping_item["lookupBy"] = row['Lookup By']
-
-        if row.get('Required'): mapping_item["required"] = True
+        mapping_item = {
+            "source": row['Source Column'], 
+            "target": row['Target Column']
+        }
+        if row['Transformers']: 
+            mapping_item["transformers"] = [t.strip() for t in str(row['Transformers']).split(',') if t.strip()]
+        if row['Validators']: 
+            mapping_item["validators"] = [v.strip() for v in str(row['Validators']).split(',') if v.strip()]
+            
         config_data["mappings"].append(mapping_item)
     return config_data

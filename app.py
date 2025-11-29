@@ -3,7 +3,7 @@ import os
 import database as db
 
 # Import Views
-from views import schema_mapper, migration_engine, file_explorer, settings
+from views import schema_mapper, migration_engine, file_explorer, settings, er_diagram
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="HIS Migration Toolkit", layout="wide", page_icon="🏥")
@@ -18,7 +18,16 @@ st.title("🏥 HIS Migration Toolkit Center")
 
 with st.sidebar:
     st.header("Navigate")
-    page = st.radio("Go to", ["📊 Schema Mapper", "🚀 Migration Engine", "📁 File Explorer", "⚙️ Datasource & Config"])
+    page = st.radio(
+        "Go to", 
+        [
+            "📊 Schema Mapper", 
+            "🚀 Migration Engine", 
+            "🗺️ ER Diagram",
+            "📁 File Explorer", 
+            "⚙️ Datasource & Config"
+        ]
+    )
     st.divider()
     st.caption(f"📂 Root: {BASE_DIR}")
     st.caption("💾 Storage: SQLite")
@@ -29,6 +38,9 @@ if page == "📊 Schema Mapper":
     
 elif page == "🚀 Migration Engine":
     migration_engine.render_migration_engine_page()
+    
+elif page == "🗺️ ER Diagram":
+    er_diagram.render_er_diagram_page()
     
 elif page == "📁 File Explorer":
     file_explorer.render_file_explorer_page(BASE_DIR)

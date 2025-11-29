@@ -171,7 +171,7 @@ def test_db_connection(db_type, host, port, db_name, user, password):
         return False, f"Connection Error: {str(e)}"
 
 
-def get_tables_from_datasource(db_type, host, port, db_name, user, password):
+def get_tables_from_datasource(db_type, host, port, db_name, user, password, schema=None):
     """
     Retrieves list of tables from a datasource.
     Uses connection pool to reuse connections.
@@ -185,9 +185,11 @@ def get_tables_from_datasource(db_type, host, port, db_name, user, password):
         if db_type == "MySQL":
             cursor.execute("SHOW TABLES")
         elif db_type == "Microsoft SQL Server":
-            cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME")
+            schema_filter = schema if schema else 'dbo'
+            cursor.execute(f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY TABLE_NAME")
         elif db_type == "PostgreSQL":
-            cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name")
+            schema_filter = schema if schema else 'public'
+            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema_filter}' ORDER BY table_name")
         else:
             return False, f"Unknown Database Type: {db_type}"
 
@@ -203,7 +205,7 @@ def get_tables_from_datasource(db_type, host, port, db_name, user, password):
         return False, f"Error retrieving tables: {str(e)}"
 
 
-def get_columns_from_table(db_type, host, port, db_name, user, password, table_name):
+def get_columns_from_table(db_type, host, port, db_name, user, password, table_name, schema=None):
     """
     Retrieves column information from a specific table.
     Uses connection pool to reuse connections.
@@ -218,18 +220,20 @@ def get_columns_from_table(db_type, host, port, db_name, user, password, table_n
             cursor.execute(f"DESCRIBE `{table_name}`")
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
         elif db_type == "Microsoft SQL Server":
+            schema_filter = schema if schema else 'dbo'
             cursor.execute(f"""
                 SELECT COLUMN_NAME, DATA_TYPE
                 FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = '{table_name}'
+                WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_filter}'
                 ORDER BY ORDINAL_POSITION
             """)
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
         elif db_type == "PostgreSQL":
+            schema_filter = schema if schema else 'public'
             cursor.execute(f"""
                 SELECT column_name, data_type
                 FROM information_schema.columns
-                WHERE table_name = '{table_name}'
+                WHERE table_name = '{table_name}' AND table_schema = '{schema_filter}'
                 ORDER BY ordinal_position
             """)
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
@@ -245,6 +249,82 @@ def get_columns_from_table(db_type, host, port, db_name, user, password, table_n
         return False, str(e)
     except Exception as e:
         return False, f"Error retrieving columns: {str(e)}"
+
+def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
+    """
+    Retrieves foreign key relationships from the database.
+    Returns: (success: bool, result: list of dicts [{'table': str, 'col': str, 'ref_table': str, 'ref_col': str}])
+    """
+    try:
+        conn, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+        relationships = []
+
+        if db_type == "MySQL":
+            query = f"""
+                SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE REFERENCED_TABLE_SCHEMA = '{db_name}' 
+                AND REFERENCED_TABLE_NAME IS NOT NULL
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                relationships.append({
+                    "table": row[0], "col": row[1],
+                    "ref_table": row[2], "ref_col": row[3]
+                })
+
+        elif db_type == "PostgreSQL":
+            schema_filter = schema if schema else 'public'
+            query = f"""
+                SELECT
+                    tc.table_name, kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
+                FROM
+                    information_schema.table_constraints AS tc
+                    JOIN information_schema.key_column_usage AS kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                      AND tc.table_schema = kcu.table_schema
+                    JOIN information_schema.constraint_column_usage AS ccu
+                      ON ccu.constraint_name = tc.constraint_name
+                      AND ccu.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema_filter}'
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                relationships.append({
+                    "table": row[0], "col": row[1],
+                    "ref_table": row[2], "ref_col": row[3]
+                })
+
+        elif db_type == "Microsoft SQL Server":
+            # Simplified query for MSSQL relationships
+            query = """
+                SELECT 
+                    tp.name, cp.name, tr.name, cr.name
+                FROM 
+                    sys.foreign_keys fk
+                INNER JOIN 
+                    sys.tables tp ON fk.parent_object_id = tp.object_id
+                INNER JOIN 
+                    sys.tables tr ON fk.referenced_object_id = tr.object_id
+                INNER JOIN 
+                    sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+                INNER JOIN 
+                    sys.columns cp ON fkc.parent_column_id = cp.column_id AND fkc.parent_object_id = cp.object_id
+                INNER JOIN 
+                    sys.columns cr ON fkc.referenced_column_id = cr.column_id AND fkc.referenced_object_id = cr.object_id
+            """
+            cursor.execute(query)
+            for row in cursor.fetchall():
+                relationships.append({
+                    "table": row[0], "col": row[1],
+                    "ref_table": row[2], "ref_col": row[3]
+                })
+
+        cursor.close()
+        return True, relationships
+
+    except Exception as e:
+        return False, f"Error getting FKs: {str(e)}"
 
 
 def close_connection(db_type, host, port, db_name, user):
