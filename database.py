@@ -143,9 +143,28 @@ def get_configs_list():
     """Retrieves a list of saved configurations, sorted by update time."""
     conn = get_connection()
     try:
-        df = pd.read_sql_query("SELECT config_name, table_name, updated_at FROM configs ORDER BY updated_at DESC", conn)
-    except:
-        df = pd.DataFrame()
+        # Fetch json_data to extract target table info
+        df = pd.read_sql_query("SELECT config_name, table_name, json_data, updated_at FROM configs ORDER BY updated_at DESC", conn)
+        
+        # Helper to extract target table from JSON string
+        def extract_target(json_str):
+            try:
+                data = json.loads(json_str)
+                return data.get('target', {}).get('table', '-')
+            except:
+                return '-'
+
+        if not df.empty:
+            df['destination_table'] = df['json_data'].apply(extract_target)
+            # Remove json_data column to keep DF lightweight for UI
+            df = df.drop(columns=['json_data'])
+            
+            # Rename for clarity
+            df = df.rename(columns={'table_name': 'source_table'})
+            
+    except Exception as e:
+        # Return empty DF with expected columns if error
+        df = pd.DataFrame(columns=['config_name', 'source_table', 'destination_table', 'updated_at'])
     finally:
         conn.close()
     return df
@@ -160,3 +179,16 @@ def get_config_content(config_name):
     if row:
         return json.loads(row[0])
     return None
+
+def delete_config(config_name):
+    """Deletes a configuration from the database by name."""
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM configs WHERE config_name=?", (config_name,))
+        conn.commit()
+        return True, "Config deleted successfully"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
