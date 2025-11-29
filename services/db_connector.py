@@ -326,30 +326,93 @@ def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
     except Exception as e:
         return False, f"Error getting FKs: {str(e)}"
 
-def get_table_sample_data(db_type, host, port, db_name, user, password, table_name, limit=50):
+def get_table_sample_data(db_type, host, port, db_name, user, password, table_name, limit=50, schema=None):
     """
     Retrieves a sample of data from a table to analyze content.
     Returns: (success: bool, data: list of lists (rows), columns: list of str)
     """
     try:
         conn, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-        
+
+        # Build table reference with schema if needed
+        table_ref = table_name
+        if schema:
+            if db_type == "Microsoft SQL Server":
+                table_ref = f"[{schema}].[{table_name}]"
+            elif db_type == "PostgreSQL":
+                table_ref = f'"{schema}"."{table_name}"'
+
         query = ""
         if db_type == "Microsoft SQL Server":
-            query = f"SELECT TOP {limit} * FROM {table_name}"
+            query = f"SELECT TOP {limit} * FROM {table_ref}"
         else:
-            query = f"SELECT * FROM {table_name} LIMIT {limit}"
-            
+            query = f"SELECT * FROM {table_ref} LIMIT {limit}"
+
         cursor.execute(query)
-        
+
         # Get column names
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
-        
+
         cursor.close()
         return True, rows, columns
     except Exception as e:
         return False, str(e), []
+
+
+def get_column_sample_values(db_type, host, port, db_name, user, password, table_name, column_name, limit=20, schema=None):
+    """
+    Retrieves distinct sample values from a specific column for AI analysis.
+    Filters out NULL and empty values to get meaningful samples.
+
+    Returns: (success: bool, values: list or error_message: str)
+    """
+    try:
+        conn, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+
+        # Build table reference with schema if needed
+        table_ref = table_name
+        if schema:
+            if db_type == "Microsoft SQL Server":
+                table_ref = f"[{schema}].[{table_name}]"
+            elif db_type == "PostgreSQL":
+                table_ref = f'"{schema}"."{table_name}"'
+
+        # Build query to get distinct non-null, non-empty values
+        if db_type == "MySQL":
+            query = f"""
+                SELECT DISTINCT `{column_name}`
+                FROM {table_ref}
+                WHERE `{column_name}` IS NOT NULL
+                  AND CAST(`{column_name}` AS CHAR) <> ''
+                LIMIT {limit}
+            """
+        elif db_type == "PostgreSQL":
+            query = f"""
+                SELECT DISTINCT "{column_name}"
+                FROM {table_ref}
+                WHERE "{column_name}" IS NOT NULL
+                  AND CAST("{column_name}" AS TEXT) <> ''
+                LIMIT {limit}
+            """
+        elif db_type == "Microsoft SQL Server":
+            query = f"""
+                SELECT DISTINCT TOP {limit} [{column_name}]
+                FROM {table_ref}
+                WHERE [{column_name}] IS NOT NULL
+                  AND CAST([{column_name}] AS NVARCHAR(MAX)) <> ''
+            """
+        else:
+            return False, f"Unknown Database Type: {db_type}"
+
+        cursor.execute(query)
+        values = [row[0] for row in cursor.fetchall()]
+
+        cursor.close()
+        return True, values
+
+    except Exception as e:
+        return False, f"Error fetching sample values: {str(e)}"
 
 def close_connection(db_type, host, port, db_name, user):
     """
