@@ -315,15 +315,15 @@ def render_schema_mapper_page():
 
             with config_detail_cols[0]:
                 config_name_display = loaded_config_json.get('name', '')
-                st.text_input("Config Name", value=config_name_display, disabled=True, label_visibility="visible")
+                st.text_input("Config Name", value=config_name_display, disabled=True, label_visibility="visible", key="saved_config_name")
 
             with config_detail_cols[1]:
                 src_db = loaded_config_json.get('source', {}).get('database', '')
-                st.text_input("Source Database", value=src_db, disabled=True, label_visibility="visible")
+                st.text_input("Source Database", value=src_db, disabled=True, label_visibility="visible", key="saved_src_db")
 
             with config_detail_cols[2]:
                 src_tbl = loaded_config_json.get('source', {}).get('table', '')
-                st.text_input("Source Table", value=src_tbl, disabled=True, label_visibility="visible")
+                st.text_input("Source Table", value=src_tbl, disabled=True, label_visibility="visible", key="saved_src_tbl")
 
             config_detail_cols2 = st.columns([2, 2, 2, 2])
 
@@ -399,7 +399,8 @@ def render_schema_mapper_page():
                         value=tgt_tbl,
                         disabled=True,
                         label_visibility="visible",
-                        help="Select a Target Database first"
+                        help="Select a Target Database first",
+                        key="config_detail_tgt_tbl_disabled"
                     )
 
         # --- Context Switch Detection ---
@@ -467,13 +468,13 @@ def render_schema_mapper_page():
                             tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
                             tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
                         )
-                        if ok: 
+                        if ok:
                             target_tables = res
                             def_tbl_idx = target_tables.index(default_tgt_tbl) if (default_tgt_tbl and default_tgt_tbl in target_tables) else (target_tables.index(active_table) if active_table in target_tables else 0)
-                            target_table_input = c_tgt_2.selectbox("Target Table", target_tables, index=def_tbl_idx, key="tgt_tbl_sel")
+                            target_table_input = c_tgt_2.selectbox("Target Table", target_tables, index=def_tbl_idx, key="tgt_tbl_cfg_sel")
                         else:
-                            target_table_input = c_tgt_2.text_input("Target Table", value=default_tgt_tbl if default_tgt_tbl else active_table, key="tgt_tbl_txt")
-                    
+                            target_table_input = c_tgt_2.text_input("Target Table", value=default_tgt_tbl if default_tgt_tbl else active_table, key="tgt_tbl_cfg_txt")
+
                     if target_table_input:
                         ok, cols = get_columns_from_table(
                             tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
@@ -481,7 +482,7 @@ def render_schema_mapper_page():
                         )
                         if ok: real_target_columns = [c['name'] for c in cols]
                 else:
-                    target_table_input = c_tgt_2.text_input("Target Table", value="", placeholder="Please select datasource first", disabled=True, key="tgt_tbl_disabled")
+                    target_table_input = c_tgt_2.text_input("Target Table", value="", placeholder="Please select datasource first", disabled=True, key="tgt_tbl_cfg_disabled")
             
             st.session_state.mapper_tgt_db = target_db_input
             st.session_state.mapper_tgt_tbl = target_table_input
@@ -530,10 +531,10 @@ def render_schema_mapper_page():
             src_db_cols = st.columns([2, 2])
             with src_db_cols[0]:
                 src_db_name = loaded_config.get('source', {}).get('database', '') if loaded_config else source_db_input
-                st.text_input("Source Database", value=src_db_name, disabled=True, label_visibility="visible")
+                st.text_input("Source Database", value=src_db_name, disabled=True, label_visibility="visible", key="metadata_src_db")
             with src_db_cols[1]:
                 src_tbl_name = loaded_config.get('source', {}).get('table', '') if loaded_config else source_table_name
-                st.text_input("Source Table", value=src_tbl_name, disabled=True, label_visibility="visible")
+                st.text_input("Source Table", value=src_tbl_name, disabled=True, label_visibility="visible", key="metadata_src_tbl")
 
             # Row 3: Target Database & Table (Editable)
             tgt_cols = st.columns([2, 2])
@@ -577,15 +578,52 @@ def render_schema_mapper_page():
                         value=tgt_tbl_name,
                         disabled=True,
                         label_visibility="visible",
-                        help="Select a Target Database first"
+                        help="Select a Target Database first",
+                        key="metadata_tgt_tbl_disabled"
                     )
+
+            # Row 4: Batch Size
+            batch_cols = st.columns([4])
+            with batch_cols[0]:
+                batch_size = st.number_input(
+                    "Batch Size (records per batch)",
+                    min_value=10,
+                    max_value=10000,
+                    value=1000,
+                    step=10,
+                    label_visibility="visible",
+                    help="Number of records to process in each batch during migration"
+                )
+                st.session_state.mapper_batch_size = batch_size
 
         # ------------------ 1. AGGRID TABLE ------------------
         if not st.session_state.mapper_focus_mode:
-            c_head, c_ai = st.columns([2, 1])
+            c_head, c_ai, c_ignore = st.columns([1.5, 1, 1.5])
             with c_head:
                 st.markdown("### 📋 Field Mapping")
                 st.caption("Select a row to edit details below.")
+
+            with c_ignore:
+                col_check_all, col_uncheck_all = st.columns(2)
+                with col_check_all:
+                    if st.button("✓ Check All Ignore", use_container_width=True, help="Mark all columns as ignored"):
+                        df_current = st.session_state[f"df_{active_table}"]
+                        df_current['Ignore'] = True
+                        df_current['Required'] = False
+                        st.session_state[f"df_{active_table}"] = df_current
+                        st.session_state.mapper_editor_ver = time.time()
+                        st.success("✓ All columns marked as ignored")
+                        st.rerun()
+
+                with col_uncheck_all:
+                    if st.button("✗ Uncheck All", use_container_width=True, help="Unmark all columns as ignored"):
+                        df_current = st.session_state[f"df_{active_table}"]
+                        df_current['Ignore'] = False
+                        st.session_state[f"df_{active_table}"] = df_current
+                        st.session_state.mapper_editor_ver = time.time()
+                        st.success("✗ All columns unmarked as ignored")
+                        st.rerun()
+
             with c_ai:
                 # --- AI AUTO-MAP BUTTON ---
                 if real_target_columns:
@@ -637,7 +675,7 @@ def render_schema_mapper_page():
 
         grid_response = AgGrid(
             df_to_edit, gridOptions=gridOptions, height=grid_height, width='100%',
-            data_return_mode=DataReturnMode.FILTERED_AND_SORTED, 
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
             update_mode=GridUpdateMode.MODEL_CHANGED,
             fit_columns_on_grid_load=False, allow_unsafe_jscode=True, key=unique_key
         )
@@ -645,6 +683,11 @@ def render_schema_mapper_page():
         if grid_response['data'] is not None:
             updated_df = pd.DataFrame(grid_response['data'])
             if not updated_df.equals(st.session_state[f"df_{active_table}"]):
+                # Auto-uncheck "Required" for ignored columns
+                for idx, row in updated_df.iterrows():
+                    if row.get('Ignore', False):
+                        updated_df.at[idx, 'Required'] = False
+
                 st.session_state[f"df_{active_table}"] = updated_df
 
         # ------------------ 2. QUICK EDIT PANEL ------------------
@@ -680,10 +723,18 @@ def render_schema_mapper_page():
                     with c_edit_3:
                         new_vals = st.multiselect("Validators", VALIDATOR_OPTIONS, default=def_vals, key=f"ms_vd_{src_col}")
                     
+                    # Get ignore status from the row
+                    is_ignored = sel_row.get('Ignore', False)
+
                     if st.button("✅ Update Row", type="primary"):
                         st.session_state[f"df_{active_table}"].at[idx, 'Target Column'] = new_target
                         st.session_state[f"df_{active_table}"].at[idx, 'Transformers'] = ", ".join(new_trans)
                         st.session_state[f"df_{active_table}"].at[idx, 'Validators'] = ", ".join(new_vals)
+
+                        # Auto-uncheck Required if column is ignored
+                        if is_ignored:
+                            st.session_state[f"df_{active_table}"].at[idx, 'Required'] = False
+
                         st.session_state.mapper_editor_ver = time.time()
                         st.rerun()
 
@@ -862,37 +913,38 @@ def init_editor_state(df, table_name, config_json=None):
         if config_json:
             for m in config_json.get('mappings', []):
                 mapping_dict[m['source']] = m
-        
+
         editor_data = []
         for _, row in df.iterrows():
             src_col = row.get('Column', '')
             dtype = row.get('DataType', '')
-            
+
             target_col = helpers.to_snake_case(src_col)
             transformers = []
             validators = []
             ignore = False
-            
+
             if src_col in mapping_dict:
                 rule = mapping_dict[src_col]
                 target_col = rule.get('target', target_col)
+                ignore = rule.get('ignore', False)
                 if 'transformers' in rule:
                     transformers = rule['transformers']
                 if 'validators' in rule:
                     validators = rule['validators']
-            elif not config_json: 
-                if "date" in str(dtype).lower(): 
+            elif not config_json:
+                if "date" in str(dtype).lower():
                     transformers.append("BUDDHIST_TO_ISO")
                     validators.append("VALID_DATE")
-            
+
             editor_data.append({
                 "Status": "",
-                "Source Column": src_col, 
-                "Type": dtype, 
+                "Source Column": src_col,
+                "Type": dtype,
                 "Target Column": target_col,
-                "Transformers": ", ".join(transformers), 
+                "Transformers": ", ".join(transformers),
                 "Validators": ", ".join(validators),
-                "Required": False, 
+                "Required": False,
                 "Ignore": ignore
             })
         st.session_state[state_key] = pd.DataFrame(editor_data)
