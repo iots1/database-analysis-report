@@ -49,6 +49,9 @@ def render_schema_mapper_page():
 
     # Session Init
     if "source_mode" not in st.session_state: st.session_state.source_mode = "Run ID"
+    if "mapper_show_history" not in st.session_state: st.session_state.mapper_show_history = False
+    if "mapper_show_compare" not in st.session_state: st.session_state.mapper_show_compare = False
+    if "mapper_config_name" not in st.session_state: st.session_state.mapper_config_name = ""
     
     selected_table = None
     df_raw = None
@@ -99,15 +102,15 @@ def render_schema_mapper_page():
                 if datasource_names:
                     with col_src_sel:
                         src_ds_name = st.selectbox("Source DB", datasource_names, key="src_ds")
-                        
+
                         if src_ds_name != "-- Select Datasource --":
                             src_ds = db.get_datasource_by_name(src_ds_name)
-                            
+
                             if src_ds:
-                                c_status, c_btn = st.columns([3, 1])
+                                c_status, c_btn, c_live = st.columns([2.5, 1, 0.8])
                                 status_key = f"conn_status_{src_ds_name}"
                                 if status_key not in st.session_state: st.session_state[status_key] = "unknown"
-                                
+
                                 with c_status:
                                     if st.session_state[status_key] == "success":
                                         st.success(f"🟢 Connected: {src_ds['host']}")
@@ -115,11 +118,11 @@ def render_schema_mapper_page():
                                         st.error(f"🔴 Connection Failed: {src_ds['host']}")
                                     else:
                                         st.info(f"⚪ Ready to connect: {src_ds['host']}")
-                                
+
                                 with c_btn:
                                     if st.button("📡 Test", key="btn_test_conn"):
                                         ok, msg = test_db_connection(
-                                            src_ds['db_type'], src_ds['host'], src_ds['port'], 
+                                            src_ds['db_type'], src_ds['host'], src_ds['port'],
                                             src_ds['dbname'], src_ds['username'], src_ds['password']
                                         )
                                         if ok:
@@ -128,6 +131,17 @@ def render_schema_mapper_page():
                                         else:
                                             st.session_state[status_key] = "fail"
                                             st.toast(f"Connection Failed: {msg}")
+
+                                with c_live:
+                                    st.write("")
+                                    if st.button("🔄 Live", key="btn_live_status", help="Check live status", use_container_width=True):
+                                        with st.spinner("Checking..."):
+                                            ok, msg = test_db_connection(
+                                                src_ds['db_type'], src_ds['host'], src_ds['port'],
+                                                src_ds['dbname'], src_ds['username'], src_ds['password']
+                                            )
+                                            st.session_state[status_key] = "success" if ok else "fail"
+                                            st.rerun()
 
                                 if st.session_state[status_key] == "success":
                                     success, tables = get_tables_from_datasource(
@@ -310,6 +324,32 @@ def render_schema_mapper_page():
         # Initialize Data
         init_editor_state(active_df_raw, active_table, loaded_config)
 
+        # --- CONFIG NAME SECTION (Top of Table) ---
+        default_config_name = f"{active_table}_config"
+        is_edit_existing = False
+        if loaded_config and loaded_config.get('name'):
+            default_config_name = loaded_config.get('name')
+            is_edit_existing = (st.session_state.source_mode == "Saved Config")
+
+        if not st.session_state.mapper_focus_mode:
+            st.markdown("---")
+            c_config_1, c_config_2, c_config_3 = st.columns([2, 1, 1])
+            with c_config_1:
+                if is_edit_existing:
+                    st.text_input("Current Config Name", value=default_config_name, disabled=True, label_visibility="visible")
+                else:
+                    st.session_state.mapper_config_name = st.text_input("Config Name", value=default_config_name, label_visibility="visible", key="config_name_input")
+            with c_config_2:
+                st.write("")
+                st.write("")
+                if st.button("📜 Show History", use_container_width=True, help="View config version history"):
+                    st.session_state.mapper_show_history = not st.session_state.mapper_show_history
+            with c_config_3:
+                st.write("")
+                st.write("")
+                if st.button("🔄 Compare Versions", use_container_width=True, help="Compare two config versions"):
+                    st.session_state.mapper_show_compare = not st.session_state.mapper_show_compare
+
         # ------------------ 1. AGGRID TABLE ------------------
         if not st.session_state.mapper_focus_mode:
             c_head, c_ai = st.columns([2, 1])
@@ -324,7 +364,7 @@ def render_schema_mapper_page():
                             # Run ML Mapping
                             source_cols = st.session_state[f"df_{active_table}"]['Source Column'].tolist()
                             suggestions = ml_mapper.suggest_mapping(source_cols, real_target_columns)
-                            
+
                             # Apply suggestions
                             df_current = st.session_state[f"df_{active_table}"]
                             match_count = 0
@@ -333,7 +373,7 @@ def render_schema_mapper_page():
                                 if src in suggestions and suggestions[src]:
                                     df_current.at[idx, 'Target Column'] = suggestions[src]
                                     match_count += 1
-                            
+
                             st.session_state[f"df_{active_table}"] = df_current
                             st.session_state.mapper_editor_ver = time.time()
                             st.success(f"🤖 AI matched {match_count} columns!")
@@ -419,41 +459,35 @@ def render_schema_mapper_page():
 
         # ==================== BOTTOM CONTROLS ====================
         st.markdown("---")
-        default_config_name = f"{active_table}_config"
-        is_edit_existing = False
-        if loaded_config and loaded_config.get('name'):
-             default_config_name = loaded_config.get('name')
-             is_edit_existing = (st.session_state.source_mode == "Saved Config")
-        
-        col_validate, col_preview, col_save = st.columns([1, 1, 2.5])
-        
+        col_validate, col_preview, col_save = st.columns([1, 1, 2])
+
         with col_validate:
-            st.write("") 
+            st.write("")
             if st.button("🔍 Validate Targets", use_container_width=True):
                 if not target_db_input or target_db_input == "-- Select Datasource --":
-                     st.warning("⚠️ Please select a Target Datasource first.")
+                    st.warning("⚠️ Please select a Target Datasource first.")
                 else:
                     tgt_ds = db.get_datasource_by_name(target_db_input)
                     if tgt_ds:
                         with st.spinner(f"Connecting to Target..."):
                             is_connected, conn_msg = test_db_connection(
-                                tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                                tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'],
                                 tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
                             )
-                        
+
                         if not is_connected:
-                             st.error(f"❌ Cannot connect to Target DB: {conn_msg}")
+                            st.error(f"❌ Cannot connect to Target DB: {conn_msg}")
                         else:
                             with st.spinner(f"Fetching columns for '{target_table_input}'..."):
                                 ok, cols = get_columns_from_table(
-                                    tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], 
+                                    tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'],
                                     tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password'], target_table_input
                                 )
                                 if ok:
                                     real_target_columns = [c['name'] for c in cols]
                                     updated_df = validate_mapping_in_table(st.session_state[f"df_{active_table}"], real_target_columns)
                                     st.session_state[f"df_{active_table}"] = updated_df
-                                    st.session_state.mapper_editor_ver = time.time() 
+                                    st.session_state.mapper_editor_ver = time.time()
                                     st.rerun()
                                 else:
                                     st.error(f"❌ Cannot fetch columns: {cols}")
@@ -464,10 +498,10 @@ def render_schema_mapper_page():
             st.write("")
             if st.button("👁️ Preview JSON", use_container_width=True):
                 current_df = st.session_state[f"df_{active_table}"]
-                preview_config_name = default_config_name 
-                
+                config_name_to_use = st.session_state.get("mapper_config_name", default_config_name) if not is_edit_existing else default_config_name
+
                 params = {
-                    "config_name": preview_config_name,
+                    "config_name": config_name_to_use,
                     "table_name": active_table,
                     "module": loaded_config.get('module', 'patient') if loaded_config else 'patient',
                     "source_db": st.session_state.get("mapper_source_db"),
@@ -492,29 +526,97 @@ def render_schema_mapper_page():
                 }
                 json_data = generate_json_config(params, current_df)
                 success, msg = db.save_config_to_db(params['config_name'], active_table, json_data)
-                if success: st.success(msg)
-                else: st.error(msg)
-            
+                if success:
+                    st.success(msg)
+                    st.session_state.mapper_editor_ver = time.time()
+                else:
+                    st.error(msg)
+
+            st.write("")
             if is_edit_existing:
-                c_ovr, c_new = st.columns([1, 1.5])
-                with c_ovr:
-                     st.write("") 
-                     st.write("") 
-                     if st.button(f"💾 Save (Overwrite)", type="primary", use_container_width=True, help=f"Update '{default_config_name}'"):
-                        do_save(default_config_name)
-                with c_new:
-                    new_name_input = st.text_input("New Config Name", value=f"{default_config_name}_copy", label_visibility="visible")
-                    if st.button("🆕 Save as New", use_container_width=True):
-                         do_save(new_name_input)
+                if st.button(f"💾 Save (Overwrite)", type="primary", use_container_width=True, help=f"Update '{default_config_name}'"):
+                    do_save(default_config_name)
+                    st.rerun()
             else:
-                c_input, c_btn = st.columns([2, 1])
-                with c_input:
-                    save_name_input = st.text_input("Config Name", value=default_config_name, label_visibility="visible")
-                with c_btn:
-                    st.write("") 
-                    st.write("") 
-                    if st.button("💾 Save Configuration", type="primary", use_container_width=True):
-                        do_save(save_name_input)
+                config_name_to_save = st.session_state.get("mapper_config_name", default_config_name)
+                if st.button("💾 Save Configuration", type="primary", use_container_width=True):
+                    do_save(config_name_to_save)
+                    st.rerun()
+
+        # ==================== CONFIG HISTORY VIEWER ====================
+        if st.session_state.get("mapper_show_history", False):
+            st.markdown("---")
+            st.markdown("### 📜 Config Version History")
+            config_to_view = st.session_state.get("mapper_config_name", default_config_name) if not is_edit_existing else default_config_name
+            history_df = db.get_config_history(config_to_view)
+
+            if not history_df.empty:
+                st.write(f"Found **{len(history_df)}** versions of '{config_to_view}'")
+                for idx, row in history_df.iterrows():
+                    with st.container(border=True):
+                        c_v, c_time, c_btn = st.columns([1, 2, 1])
+                        with c_v:
+                            st.write(f"**Version {int(row['version'])}**")
+                        with c_time:
+                            st.write(f"📅 {row['created_at']}")
+                        with c_btn:
+                            if st.button(f"👁️ View", key=f"view_v{int(row['version'])}"):
+                                version_data = db.get_config_version(config_to_view, int(row['version']))
+                                if version_data:
+                                    show_json_preview(version_data)
+            else:
+                st.info(f"No history found for '{config_to_view}'. Save a config to create history.")
+
+        # ==================== CONFIG COMPARISON VIEWER ====================
+        if st.session_state.get("mapper_show_compare", False):
+            st.markdown("---")
+            st.markdown("### 🔄 Compare Config Versions")
+            config_to_compare = st.session_state.get("mapper_config_name", default_config_name) if not is_edit_existing else default_config_name
+            history_df = db.get_config_history(config_to_compare)
+
+            if not history_df.empty and len(history_df) >= 2:
+                c_v1, c_v2 = st.columns(2)
+                with c_v1:
+                    v1 = st.selectbox("Version 1", history_df['version'].tolist(), index=0, key="comp_v1")
+                with c_v2:
+                    v2 = st.selectbox("Version 2", history_df['version'].tolist(), index=1 if len(history_df) > 1 else 0, key="comp_v2")
+
+                if st.button("📊 Show Diff", type="primary", use_container_width=True):
+                    diff = db.compare_config_versions(config_to_compare, int(v1), int(v2))
+                    if diff:
+                        st.write(f"**Comparing Version {int(v1)} vs Version {int(v2)}**")
+
+                        if diff['mappings_added']:
+                            st.markdown("#### ✅ Added Mappings")
+                            for m in diff['mappings_added']:
+                                st.write(f"- `{m['source']}` → `{m['target']}`")
+
+                        if diff['mappings_removed']:
+                            st.markdown("#### ❌ Removed Mappings")
+                            for m in diff['mappings_removed']:
+                                st.write(f"- `{m['source']}` → `{m['target']}`")
+
+                        if diff['mappings_modified']:
+                            st.markdown("#### 🔄 Modified Mappings")
+                            for m in diff['mappings_modified']:
+                                st.write(f"**{m['source']}**")
+                                old_target = m['old'].get('target', '')
+                                new_target = m['new'].get('target', '')
+                                st.write(f"  - Target: `{old_target}` → `{new_target}`")
+
+                                # Show transformer changes
+                                old_trans = m['old'].get('transformers', [])
+                                new_trans = m['new'].get('transformers', [])
+                                if old_trans != new_trans:
+                                    st.write(f"  - Transformers: {old_trans} → {new_trans}")
+
+                                # Show validator changes
+                                old_val = m['old'].get('validators', [])
+                                new_val = m['new'].get('validators', [])
+                                if old_val != new_val:
+                                    st.write(f"  - Validators: {old_val} → {new_val}")
+            else:
+                st.info(f"Need at least 2 versions to compare. Current versions: {len(history_df)}")
 
 # --- Helpers ---
 
@@ -611,13 +713,14 @@ def generate_json_config(params, mappings_df):
         "mappings": []
     }
     for _, row in mappings_df.iterrows():
-        if row.get('Ignore', False): continue
-        
+        is_ignored = row.get('Ignore', False)
+
         mapping_item = {
-            "source": row['Source Column'], 
-            "target": row['Target Column']
+            "source": row['Source Column'],
+            "target": row['Target Column'],
+            "status": not is_ignored
         }
-        
+
         tf_val = row.get('Transformers')
         if tf_val:
             if isinstance(tf_val, list):
@@ -631,6 +734,6 @@ def generate_json_config(params, mappings_df):
                 mapping_item["validators"] = vd_val
             elif isinstance(vd_val, str) and vd_val.strip():
                 mapping_item["validators"] = [v.strip() for v in vd_val.split(',') if v.strip()]
-            
+
         config_data["mappings"].append(mapping_item)
     return config_data
